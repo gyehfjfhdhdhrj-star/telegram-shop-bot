@@ -2,8 +2,8 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # မိမိ၏ Token နှင့် Admin Chat ID များကို ဒီနေရာတွင် တိုက်ရိုက် ထည့်ပါ
-TELEGRAM_TOKEN = 'YOUR_TELEGRAM_TOKEN'
-ADMIN_ID = 'YOUR_ADMIN_CHAT_ID'  # ID ကို String အနေဖြင့် ထည့်ပါ (ဥပမာ '123456789')
+TELEGRAM_TOKEN = '8614749096:AAE6EY0g2593hpXHmxrOWnhP3d1SgTuDSr4'
+ADMIN_ID = '7267372257'  # ID ကို String အနေဖြင့် ထည့်ပါ (ဥပမာ '123456789')
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 user_sell_data = {}
