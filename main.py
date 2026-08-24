@@ -11,7 +11,7 @@ accounts_db = {}
 user_data = {}    
 acc_counter = 1
 
-# 1. START MENU (MULTI-CHOICE MAIN MENU)
+# 1. MAIN MENU
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = InlineKeyboardMarkup(row_width=1)
@@ -23,7 +23,7 @@ def send_welcome(message):
     )
     bot.send_message(message.chat.id, "👋 မင်္ဂလာပါ 🎮 Gaming Shop Bot မှ ကြိုဆိုပါတယ် ⚡️\n\nပြုလုပ်လိုသည့် ဝန်ဆောင်မှုကို အောက်ပါ Button များမှ ရွေးချယ်ပေးပါ ခင်ဗျာ 📲", reply_markup=markup)
 
-# 2. TIPS & TRICKS SECTION
+# 2. TIPS & TRICKS
 @bot.callback_query_handler(func=lambda call: call.data == "show_tips")
 def show_tips_menu(call):
     markup = InlineKeyboardMarkup(row_width=1)
@@ -50,7 +50,7 @@ def show_tip_detail(call):
 def go_home(call):
     send_welcome(call.message)
 
-# 3. ADMIN PANEL (/admin)
+# 3. ADMIN PANEL
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     if message.from_user.id != ADMIN_ID:
@@ -98,7 +98,7 @@ def admin_photos_complete(call):
         bot.send_message(ADMIN_ID, f"🎉 {data['id']} အကောင့်ကို ပုံပေါင်း ({len(data['photos'])}) ပုံဖြင့် အောင်မြင်စွာ သိမ်းဆည်းလိုက်ပါပြီ ✅")
         del user_data[ADMIN_ID]
 
-# 4. BUY FLOW (MULTIPLE CHOICE SELECTION)
+# 4. BUY FLOW
 @bot.callback_query_handler(func=lambda call: call.data == "buy_acc")
 def buy_step1(call):
     markup = InlineKeyboardMarkup(row_width=2)
@@ -153,7 +153,7 @@ def buy_step3(call):
         )
         bot.send_message(user_id, text, reply_markup=markup)
 
-# 5. BROWSE FLOW (LOOK sample + MENU 3 CHOICE)
+# 5. BROWSE FLOW
 @bot.callback_query_handler(func=lambda call: call.data.startswith("browse_acc_"))
 def browse_accounts(call):
     idx = int(call.data.split("_")[2])
@@ -203,7 +203,7 @@ def confirm_buy(call):
     markup.add(InlineKeyboardButton("👨‍💻 Admin ထံ တိုက်ရိုက်သွားမည် 🚀", url="https://t.me/your_admin_username"))
     bot.send_message(call.message.chat.id, f"✅ {acc_id} အကောင့်ကို ဝယ်ယူရန် Admin ထံ တိုက်ရိုက် ဆက်သွယ်နိုင်ပါပြီ ခင်ဗျာ 💎", reply_markup=markup)
 
-# 6. SELL FLOW (MULTIPLE CHOICE + SAVE AFTER DONE BUTTON)
+# 6. SELL FLOW
 @bot.callback_query_handler(func=lambda call: call.data == "sell_acc")
 def sell_step1(call):
     user_id = call.message.chat.id
@@ -284,7 +284,7 @@ def sell_step3_price(call):
         media = [telebot.types.InputMediaPhoto(p) for p in data['photos'][:30]]
         bot.send_media_group(ADMIN_ID, media)
 
-# 7. ADMIN ACTION (ACCEPT / REJECT)
+# 7. ADMIN ACTION
 @bot.callback_query_handler(func=lambda call: call.data.startswith(("app_", "rej_")))
 def handle_admin_decision(call):
     prefix, seller_id = call.data.split("_")
@@ -300,6 +300,6 @@ def handle_admin_decision(call):
     else:
         bot.answer_callback_query(call.id, "ငြင်းပယ်လိုက်ပါပြီ ❌")
         bot.send_message(ADMIN_ID, f"❌ [REJECTED] User ID {seller_id} ၏ အကောင့်အား ငြင်းပယ်လိုက်ပါပြီ 🚫")
-        bot.send_message(seller_id, "😔 စိတ်မကောင်းပါ။ သင့်အကောင့်အား ရောင်းချရေးအတွက် Admin မှ လက်မခံပါ/ငြင်းပယ်လိုက်ပါသည် 🚫")
+        bot.send_message(seller_id, "😔 စိတ်မကောင်းပါ။ သင့်အਕောင့်အား ရောင်းချရေးအတွက် Admin မှ လက်မခံပါ/ငြင်းပယ်လိုက်ပါသည် 🚫")
 
 bot.infinity_polling()
