@@ -1,15 +1,29 @@
 import os
 import telebot
+from flask import Flask, request
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 TELEGRAM_TOKEN = '8614749096:AAE6EY0g2593hpXHmxrOWnhP3d1SgTuDSr4'
 ADMIN_ID = 7267372257  
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+app = Flask(__name__)
 
 accounts_db = {}  
 user_data = {}    
 acc_counter = 1
+
+# Render အတွက် Web Service Port ချိတ်ဆက်ခြင်း (Application Exied Early မဖြစ်စေရန်)
+@app.route('/')
+def home():
+    return "Bot is running 24/7 successfully! 🚀"
+
+@app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode('UTF-8')
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "!", 200
 
 # 1. MAIN MENU
 @bot.message_handler(commands=['start'])
@@ -300,6 +314,10 @@ def handle_admin_decision(call):
     else:
         bot.answer_callback_query(call.id, "ငြင်းပယ်လိုက်ပါပြီ ❌")
         bot.send_message(ADMIN_ID, f"❌ [REJECTED] User ID {seller_id} ၏ အကောင့်အား ငြင်းပယ်လိုက်ပါပြီ 🚫")
-        bot.send_message(seller_id, "😔 စိတ်မကောင်းပါ။ သင့်အਕောင့်အား ရောင်းချရေးအတွက် Admin မှ လက်မခံပါ/ငြင်းပယ်လိုက်ပါသည် 🚫")
+        bot.send_message(seller_id, "😔 စိတ်မကောင်းပါ။ သင့်အကောင့်အား ရောင်းချရေးအတွက် Admin မှ လက်မခံပါ/ငြင်းပယ်လိုက်ပါသည် 🚫")
 
-bot.infinity_polling()
+if __name__ == "__main__":
+    bot.remove_webhook()
+    bot.set_webhook(url=f"https://telegram-shop-bot-yiyp.onrender.com/{TELEGRAM_TOKEN}")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
