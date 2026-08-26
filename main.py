@@ -2,6 +2,7 @@ import os
 import sqlite3
 import threading
 import logging
+from difflib import SequenceMatcher
 from contextlib import closing
 
 import telebot
@@ -221,29 +222,80 @@ def get_available_accounts():
     return [row_to_account(row) for row in rows]
 
 
+def _search_similarity(term, hay):
+    """Return a fuzzy relevance score without changing stored account data."""
+    term = (term or "").strip().lower()
+    hay = (hay or "").strip().lower()
+    if not term or not hay:
+        return 0.0
+
+    # Exact/substring matches remain strongest.
+    if term == hay:
+        return 100.0
+    if term in hay:
+        return 85.0
+
+    best = 0.0
+    for token in hay.replace(",", " ").replace("/", " ").split():
+        if not token:
+            continue
+        ratio = SequenceMatcher(None, term, token).ratio()
+        best = max(best, ratio)
+    return best * 70.0
+
+
 def search_accounts(skin_keyword="", max_price=None):
+    """
+    Search AVAILABLE accounts by nearest match, not exact match only.
+    Existing account rows are read-only here; nothing is deleted or modified.
+    """
     keyword = " ".join((skin_keyword or "").lower().split())
     with db_lock:
         with closing(db_connect()) as conn:
             if max_price is None:
-                rows = conn.execute("SELECT * FROM accounts WHERE status='available' ORDER BY id ASC").fetchall()
+                rows = conn.execute(
+                    "SELECT * FROM accounts WHERE status='available' ORDER BY id ASC"
+                ).fetchall()
             else:
-                rows = conn.execute("SELECT * FROM accounts WHERE status='available' AND COALESCE(sale_price,price) <= ? ORDER BY COALESCE(sale_price,price) ASC,id ASC", (max_price,)).fetchall()
+                rows = conn.execute(
+                    "SELECT * FROM accounts WHERE status='available' "
+                    "AND COALESCE(sale_price,price) <= ? "
+                    "ORDER BY COALESCE(sale_price,price) ASC,id ASC",
+                    (max_price,)
+                ).fetchall()
+
+    accounts = [row_to_account(r) for r in rows]
     if not keyword:
-        return [row_to_account(r) for r in rows]
+        return accounts
+
     terms = [t for t in keyword.replace(",", " ").split() if t]
-    scored=[]
-    for row in rows:
-        acc=row_to_account(row)
-        hay=(acc["title"]+" "+acc["skins"]).lower()
-        score=0
-        for term in terms:
-            if term in hay: score += 10
-            for token in hay.replace(","," ").split():
-                if term in token or token in term: score += 3
-        if score:
+    scored = []
+    for acc in accounts:
+        hay = " ".join([
+            str(acc.get("title", "")),
+            str(acc.get("skins", "")),
+            str(acc.get("id", "")),
+        ]).lower()
+        term_scores = [_search_similarity(term, hay) for term in terms]
+        score = sum(term_scores) / max(len(term_scores), 1)
+
+        # Bonus when every search term has at least a reasonable match.
+        if all(v >= 35 for v in term_scores):
+            score += 15
+        if any(term in hay for term in terms):
+            score += 10
+
+        if score >= 20:
             scored.append((score, acc))
-    scored.sort(key=lambda x:(-x[0], int(x[1]["sale_price"] or x[1]["price"]), x[1]["db_id"]))
+
+    # Closest accounts first; price and ACC number are stable tie-breakers.
+    scored.sort(
+        key=lambda x: (
+            -x[0],
+            int(x[1].get("sale_price") or x[1]["price"]),
+            int(x[1]["db_id"]),
+        )
+    )
     return [x[1] for x in scored]
 
 
@@ -439,8 +491,9 @@ def send_search_result_at(chat_id, idx):
     state["search_index"]=idx; set_state(chat_id,state)
     markup=InlineKeyboardMarkup(row_width=2)
     buttons=[]
-    if idx>0: buttons.append(InlineKeyboardButton("⬅️ နောက်အကောင့်သို့ပြန်ကြည့်ရန်",callback_data="search_prev"))
-    if idx<len(ids)-1: buttons.append(InlineKeyboardButton("➡️ နောက်အကောင့်ဆက်ကြည့်ရန်",callback_data="search_next"))
+    if len(ids) > 1:
+        buttons.append(InlineKeyboardButton("⬅️ နောက်အကောင့်သို့ပြန်ကြည့်ရန်",callback_data="search_prev"))
+        buttons.append(InlineKeyboardButton("➡️ နောက်အကောင့်ဆက်ကြည့်ရန်",callback_data="search_next"))
     if buttons: markup.row(*buttons)
     markup.add(InlineKeyboardButton("🛒 ဒီအကောင့်ဝယ်မယ်",callback_data=f"buy_confirm_{acc['id']}"),InlineKeyboardButton("🔙 ပင်မ Menu",callback_data="home"))
     bot.send_message(chat_id,f"🎯 <b>{idx+1} / {len(ids)}</b> အနီးစပ်ဆုံး Account\n\n"+format_account(acc),parse_mode="HTML",reply_markup=markup)
@@ -455,7 +508,7 @@ def search_page(call):
     if not ids: return
     idx=int(state.get("search_index",0))
     idx += 1 if call.data=="search_next" else -1
-    if idx<0 or idx>=len(ids): return
+    idx %= len(ids)
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except Exception: pass
     send_search_result_at(call.message.chat.id,idx)
@@ -873,14 +926,30 @@ def sell_start(call):
 def receive_photo_message(message):
     user_id=message.from_user.id
     state=get_state(user_id)
-    if state.get("flow")!="sell_photos": return
+
+    # IMPORTANT: This generic photo handler is registered before the ADMIN photo
+    # handler, so ADMIN uploads must be handled here when the admin flow is active.
+    if user_id == ADMIN_ID and state.get("flow") == "admin_photos":
+        photos=state.get("photos",[])
+        if len(photos) >= 15:
+            return
+        photos.append(message.photo[-1].file_id)
+        state["photos"]=photos
+        set_state(user_id,state)
+        if len(photos)==1:
+            bot.send_message(ADMIN_ID,"📸 ပုံတွေ ရရှိနေပါပြီ။ အားလုံးပို့ပြီးရင် <b>ပုံအကုန်တင်ပြီးပြီ</b> ကိုနှိပ်ပါ။",parse_mode="HTML",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ပုံအကုန်တင်ပြီးပြီ",callback_data="admin_save")],[InlineKeyboardButton("❌ မသိမ်းဘူး",callback_data="admin_cancel")]]))
+        return
+
+    if state.get("flow")!="sell_photos":
+        return
     photos=state.get("photos",[])
-    if len(photos)>=15: return
+    if len(photos)>=15:
+        return
     photos.append(message.photo[-1].file_id)
     state["photos"]=photos
     set_state(user_id,state)
     if len(photos)==1:
-        bot.send_message(user_id,"📸 ပုံတွေ ရရှိနေပါပြီ။ အားလုံးပို့ပြီးရင် <b>ပုံအကုန်ပြီးပြီ</b> ကိုနှိပ်ပါ။",parse_mode="HTML",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ပုံအကုန်ပြီးပြီ",callback_data="sell_photos_done")],[InlineKeyboardButton("🔙 ပင်မ Menu",callback_data="home")]]))
+        bot.send_message(user_id,"📸 ပုံတွေ ရရှိနေပါပြီ။ အားလုံးကို တစ်ခါတည်းပို့ပြီးရင် <b>ပုံအကုန်ပြီးပြီ</b> ကိုနှိပ်ပါ။",parse_mode="HTML",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ပုံအကုန်ပြီးပြီ",callback_data="sell_photos_done")],[InlineKeyboardButton("🔙 ပင်မ Menu",callback_data="home")]]))
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "sell_photos_done")
@@ -1322,8 +1391,75 @@ def admin_list(call):
         bot.send_message(
             ADMIN_ID,
             format_account(acc),
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑️ ဒီအကောင့်ကို ဖျက်မယ်", callback_data=f"admin_delete_confirm_{acc['db_id']}")]
+            ])
         )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_delete_confirm_"))
+def admin_delete_confirm(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    remove_callback_menu(call)
+    try:
+        db_id = int(call.data.replace("admin_delete_confirm_", ""))
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ Account ID မမှန်ပါ။", reply_markup=admin_keyboard())
+        return
+
+    acc = get_account_by_text_id(make_account_id(db_id))
+    if not acc:
+        bot.send_message(ADMIN_ID, "❌ ဒီအကောင့် မတွေ့ပါ။", reply_markup=admin_keyboard())
+        return
+
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("⚠️ ဟုတ်တယ်၊ ဖျက်မယ်", callback_data=f"admin_delete_{db_id}"),
+        InlineKeyboardButton("❌ မဖျက်ဘူး", callback_data="admin_list")
+    )
+    bot.send_message(
+        ADMIN_ID,
+        f"⚠️ <b>{acc['id']}</b> ကို Database ကနေ အပြီးဖျက်မလား?\n\n"
+        "ဒီလုပ်ဆောင်ချက်က Admin ကိုယ်တိုင် အတည်ပြုပြီးမှသာ Account data ကို ဖျက်ပါမယ်။",
+        parse_mode="HTML",
+        reply_markup=markup
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_delete_") and not c.data.startswith("admin_delete_confirm_"))
+def admin_delete(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    remove_callback_menu(call)
+    try:
+        db_id = int(call.data.replace("admin_delete_", ""))
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ Account ID မမှန်ပါ။", reply_markup=admin_keyboard())
+        return
+
+    with db_lock:
+        with closing(db_connect()) as conn:
+            row = conn.execute("SELECT id FROM accounts WHERE id=?", (db_id,)).fetchone()
+            if not row:
+                bot.send_message(ADMIN_ID, "❌ ဒီအကောင့် မရှိတော့ပါ။", reply_markup=admin_keyboard())
+                return
+            conn.execute("DELETE FROM accounts WHERE id=?", (db_id,))
+            conn.commit()
+
+    # IMPORTANT: never move the counter backwards; old IDs are never reused.
+    bot.send_message(
+        ADMIN_ID,
+        f"🗑️ <b>{make_account_id(db_id)}</b> ကို Admin က Database ထဲကနေ အပြီးဖျက်ပြီးပါပြီ။\n\n"
+        "နောက်ထပ် Account အသစ်က အရင် ID ကို ပြန်အသုံးမပြုပါဘူး။",
+        parse_mode="HTML",
+        reply_markup=admin_keyboard()
+    )
 
 
 # =========================================================
