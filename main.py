@@ -432,13 +432,19 @@ def recent_activity_text():
 # =========================================================
 
 def cleanup_callback_message(call):
-    cleanup_callback_message(call)
-    """Delete the old inline-menu message so the chat stays clean."""
+    """Delete the old inline-menu message so the chat stays clean.
+
+    IMPORTANT: never call this function recursively. A previous update
+    accidentally called itself here, so every callback crashed before its
+    actual handler could run.
+    """
     try:
         if call.message and call.message.chat and call.message.message_id:
             bot.delete_message(call.message.chat.id, call.message.message_id)
     except Exception:
-        pass
+        # The old message may already be deleted or Telegram may reject the
+        # delete because it is too old. That must not stop the callback.
+        logging.debug("Could not delete callback message", exc_info=True)
 
 
 def schedule_photo_prompt(user_id, flow, delay=3.0):
