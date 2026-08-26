@@ -139,6 +139,7 @@ def init_db():
                 ("estimated_price", "INTEGER NOT NULL DEFAULT 0"),
                 ("admin_payout_price", "INTEGER"),
                 ("listing_price", "INTEGER"),
+                ("account_id", "INTEGER"),
             ]
             for column, definition in seller_request_migrations:
                 if column not in seller_columns:
@@ -430,6 +431,55 @@ def recent_activity_text():
 # UI HELPERS
 # =========================================================
 
+def cleanup_callback_message(call):
+    cleanup_callback_message(call)
+    """Delete the old inline-menu message so the chat stays clean."""
+    try:
+        if call.message and call.message.chat and call.message.message_id:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
+def schedule_photo_prompt(user_id, flow, delay=3.0):
+    """Show one confirmation button after an album stops arriving."""
+    def _send():
+        state = get_state(user_id)
+        if state.get("flow") != flow:
+            return
+        photos = state.get("photos", [])
+        if not photos:
+            return
+        state["photo_prompt_sent"] = True
+        state.pop("photo_timer", None)
+        set_state(user_id, state)
+        if flow == "sell_photos":
+            text = (
+                f"📸 <b>{len(photos)}/15 ပုံ</b> လက်ခံပြီးပါပြီ။\n\n"
+                "ပုံအားလုံးပို့ပြီးပြီဆိုရင် <b>ပုံအကုန်ပြီးပြီ</b> ကိုနှိပ်ပါ။"
+            )
+            data = "sell_photos_done"
+            cancel = "sell_cancel"
+        else:
+            text = (
+                f"📸 <b>{len(photos)}/15 ပုံ</b> လက်ခံပြီးပါပြီ။\n\n"
+                "Admin စိတ်တိုင်းကျ ပုံအရေအတွက်နဲ့ တင်နိုင်ပါတယ်။\n"
+                "အားလုံးပို့ပြီးပြီဆိုရင် <b>ပုံအကုန်တင်ပြီးပြီ</b> ကိုနှိပ်ပါ။"
+            )
+            data = "admin_save"
+            cancel = "admin_cancel"
+        bot.send_message(
+            user_id, text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ ပုံအကုန်ပြီးပြီ", callback_data=data)],
+                [InlineKeyboardButton("❌ ရပ်မယ်", callback_data=cancel)],
+            ])
+        )
+    timer = threading.Timer(delay, _send)
+    timer.daemon = True
+    timer.start()
+
+
 def main_menu(user_id):
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -667,6 +717,7 @@ def admin_command(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "home")
 def callback_home(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     clear_state(call.from_user.id)
     bot.send_message(
@@ -683,6 +734,7 @@ def callback_home(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
 def buy_menu(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     clear_state(call.from_user.id)
     log_user_activity(call.from_user, "buy_menu")
@@ -704,6 +756,7 @@ def buy_menu(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "buy_all_skin")
 def buy_all_skin(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     set_search_skin(call.from_user.id, "")
     bot.send_message(
@@ -717,6 +770,7 @@ def buy_all_skin(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("skin_") and c.data != "skin_custom")
 def buy_skin_choice(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     skin = call.data.replace("skin_", "", 1)
     set_search_skin(call.from_user.id, skin)
@@ -730,6 +784,7 @@ def buy_skin_choice(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "skin_custom")
 def buy_skin_custom(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     set_state(call.from_user.id, {"flow": "buy_skin_custom"})
     msg = bot.send_message(
@@ -761,6 +816,7 @@ def receive_custom_skin(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "budget_menu")
 def budget_menu(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     bot.send_message(
         call.message.chat.id,
@@ -773,6 +829,7 @@ def budget_menu(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("budget_") and c.data != "budget_custom")
 def budget_choice(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     try:
         budget = int(call.data.replace("budget_", ""))
@@ -789,6 +846,7 @@ def budget_choice(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "budget_custom")
 def budget_custom(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     set_state(call.from_user.id, {
         **get_state(call.from_user.id),
@@ -842,6 +900,7 @@ def browse_index(user_id):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("browse_") and c.data not in ("browse_next",))
 def browse_accounts(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     log_user_activity(call.from_user, "browse")
 
@@ -873,6 +932,7 @@ def browse_accounts(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "browse_next")
 def browse_next(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     accounts = get_available_accounts()
 
@@ -897,6 +957,7 @@ def browse_next(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("detail_"))
 def account_detail(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     account_id = call.data.replace("detail_", "", 1)
     acc = get_account_by_text_id(account_id)
@@ -929,6 +990,7 @@ def account_detail(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_confirm_"))
 def buy_confirm(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     account_id = call.data.replace("buy_confirm_", "", 1)
     acc = get_account_by_text_id(account_id)
@@ -973,6 +1035,7 @@ def buy_confirm(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "sell_start")
 def sell_start(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     clear_state(call.from_user.id)
     set_state(call.from_user.id, {
@@ -999,61 +1062,29 @@ def receive_photo_message(message):
     user_id = message.from_user.id
     state = get_state(user_id)
     flow = state.get("flow")
-
-    # Seller upload
-    if flow == "sell_photos":
-        photos = state.get("photos", [])
-        if len(photos) >= 15:
-            return
-        photos.append(message.photo[-1].file_id)
-        state["photos"] = photos
-
-        # Do not spam one message per photo. Show one confirmation button only.
-        if not state.get("photo_prompt_sent"):
-            state["photo_prompt_sent"] = True
-            set_state(user_id, state)
-            bot.send_message(
-                user_id,
-                "📸 ပုံတွေ လက်ခံနေပါတယ်။\n"
-                "ပုံအားလုံးပို့ပြီးမှ အောက်က Button ကိုနှိပ်ပါ။",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ ပုံအကုန်ပြီးပြီ", callback_data="sell_photos_done")],
-                    [InlineKeyboardButton("❌ ရပ်မယ်", callback_data="sell_cancel")]
-                ])
-            )
-        else:
-            set_state(user_id, state)
+    if flow not in ("sell_photos", "admin_photos"):
         return
-
-    # Admin upload. This MUST be here because an earlier generic photo handler
-    # used to consume admin photos before receive_admin_photo could run.
-    if user_id == ADMIN_ID and flow == "admin_photos":
-        photos = state.get("photos", [])
-        if len(photos) >= 15:
-            return
-        photos.append(message.photo[-1].file_id)
-        state["photos"] = photos
-
-        if not state.get("photo_prompt_sent"):
-            state["photo_prompt_sent"] = True
-            set_state(ADMIN_ID, state)
-            bot.send_message(
-                ADMIN_ID,
-                "📸 ပုံတွေ လက်ခံနေပါတယ်။\n"
-                "အနည်းဆုံး <b>10 ပုံ</b> ပြည့်ပြီးမှ အောက်က Button ကိုနှိပ်ပါ။",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ ပုံအကုန်တင်ပြီးပြီ", callback_data="admin_save")],
-                    [InlineKeyboardButton("❌ မသိမ်းဘူး", callback_data="admin_cancel")]
-                ])
-            )
-        else:
-            set_state(ADMIN_ID, state)
+    photos = state.get("photos", [])
+    if len(photos) >= 15:
         return
+    photos.append(message.photo[-1].file_id)
+    state["photos"] = photos[:15]
+    state["photo_prompt_sent"] = False
+    old_timer = state.get("photo_timer")
+    if old_timer:
+        try: old_timer.cancel()
+        except Exception: pass
+    set_state(user_id, state)
+    timer = threading.Timer(3.0, schedule_photo_prompt, args=(user_id, flow, 0))
+    timer.daemon = True
+    state["photo_timer"] = timer
+    set_state(user_id, state)
+    timer.start()
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "sell_photos_done")
 def sell_photos_done(call):
+    cleanup_callback_message(call)
     user_id = call.from_user.id
     state = get_state(user_id)
     photos = state.get("photos", [])
@@ -1084,6 +1115,7 @@ def sell_photos_done(call):
 
 @bot.callback_query_handler(func=lambda c: c.data in ("sell_error_yes", "sell_error_no"))
 def seller_error_choice(call):
+    cleanup_callback_message(call)
     user_id = call.from_user.id
     state = get_state(user_id)
     if state.get("flow") != "sell_error":
@@ -1172,6 +1204,7 @@ def seller_binding_text(message):
 
 @bot.callback_query_handler(func=lambda c: c.data in ("sell_moonton_yes", "sell_moonton_no"))
 def seller_moonton_choice(call):
+    cleanup_callback_message(call)
     user_id = call.from_user.id
     state = get_state(user_id)
     if state.get("flow") != "sell_moonton":
@@ -1277,6 +1310,7 @@ def seller_estimated_price(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "sell_cancel")
 def sell_cancel(call):
+    cleanup_callback_message(call)
     clear_state(call.from_user.id)
     bot.answer_callback_query(call.id)
     bot.send_message(
@@ -1289,60 +1323,102 @@ def sell_cancel(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "seller_requests")
 def seller_requests_menu(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
-        return
-
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True); return
     bot.answer_callback_query(call.id)
     with db_lock:
         with closing(db_connect()) as conn:
-            rows = conn.execute(
-                "SELECT * FROM seller_requests WHERE status='pending' ORDER BY id DESC LIMIT 20"
-            ).fetchall()
-
+            rows = conn.execute("SELECT * FROM seller_requests WHERE status IN ('pending','accepted') ORDER BY id DESC LIMIT 30").fetchall()
     if not rows:
-        bot.send_message(ADMIN_ID, "📥 Pending Seller Request မရှိပါ။", reply_markup=admin_keyboard())
-        return
-
-    bot.send_message(
-        ADMIN_ID,
-        f"📥 <b>Pending Seller Requests — {len(rows)}</b>",
-        parse_mode="HTML"
-    )
-
+        bot.send_message(ADMIN_ID, "📥 Seller Request မရှိသေးပါ။", reply_markup=admin_keyboard()); return
+    text_lines=["📥 <b>SELLER REQUESTS</b>\n"]
+    buttons=[]
     for row in rows:
-        photos = [x for x in row["photos"].split(",") if x][:15]
-        estimated = row["estimated_price"] if "estimated_price" in row.keys() and row["estimated_price"] else row["price"]
-        binding = row["binding_info"] if "binding_info" in row.keys() else ""
-        moonton = row["moonton_change"] if "moonton_change" in row.keys() else ""
+        name=f"@{row['username']}" if row['username'] else f"ID {row['user_id']}"
+        status="⏳ Pending" if row['status']=='pending' else "✅ Accepted / မတင်ရသေး"
+        text_lines.append(f"#{row['id']} — {name} — {status}")
+        if row['status']=='pending':
+            buttons.append([InlineKeyboardButton(f"#{row['id']} 👀 Request ကြည့်မယ်", callback_data=f"seller_view_{row['id']}")])
+        elif not row['listing_price']:
+            buttons.append([InlineKeyboardButton(f"#{row['id']} 📦 Marketplace တင်မယ်", callback_data=f"seller_publish_{row['id']}")])
+    buttons.append([InlineKeyboardButton("🏠 Admin Menu", callback_data="admin_home")])
+    bot.send_message(ADMIN_ID, "\n".join(text_lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
-        text = (
-            f"📥 <b>Request #{row['id']}</b>\n"
-            f"👤 @{row['username'] or 'No Username'}\n"
-            f"🆔 <code>{row['user_id']}</code>\n"
-            f"📸 {len(photos)} ပုံ\n"
-            f"⚠️ Error — <b>{row['error_info'] or 'မရှိပါ'}</b>\n"
-            f"🔗 ချိတ်ထားတာ — <b>{binding}</b>\n"
-            f"📧 Moonton Mail ချိန်း — <b>{moonton}</b>\n"
-            f"💰 Seller ခန့်မှန်းဈေး — <b>{estimated:,} MMK</b>\n\n"
-            "ပုံတွေနဲ့ အချက်အလက်အားလုံးကို စစ်ပါ။"
-        )
-        bot.send_message(
-            ADMIN_ID,
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ အတည်ပြုမယ်", callback_data=f"seller_approve_{row['id']}"),
-                    InlineKeyboardButton("❌ ငြင်းမယ်", callback_data=f"seller_reject_req_{row['id']}")
-                ]
-            ])
-        )
-        send_photo_batches(ADMIN_ID, photos, 10)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("seller_view_"))
+def seller_view(call):
+    cleanup_callback_message(call)
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True); return
+    bot.answer_callback_query(call.id)
+    rid=int(call.data.replace("seller_view_","",1))
+    with db_lock:
+        with closing(db_connect()) as conn:
+            row=conn.execute("SELECT * FROM seller_requests WHERE id=?",(rid,)).fetchone()
+    if not row or row['status']!='pending':
+        bot.send_message(ADMIN_ID,"❌ Request မရှိတော့ပါ။",reply_markup=admin_keyboard()); return
+    photos=[x for x in (row['photos'] or '').split(',') if x][:15]
+    name=f"@{row['username']}" if row['username'] else f"ID {row['user_id']}"
+    text=(f"📥 <b>Seller Request #{rid}</b>\n\n👤 {name}\n"
+          f"⚠️ Error — {row['error_info'] or 'မရှိပါ'}\n"
+          f"🔗 ချိတ်ထားမှု — {row['binding_info'] or '-'}\n"
+          f"📧 Moonton Mail — {row['moonton_change'] or '-'}\n"
+          f"💰 Seller ခန့်မှန်းဈေး — {int(row['estimated_price'] or 0):,} MMK\n"
+          f"📸 ပုံ — {len(photos)} ပုံ")
+    bot.send_message(ADMIN_ID,text,parse_mode='HTML',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ အတည်ပြု + ဖြတ်ဈေးသတ်မှတ်",callback_data=f"seller_approve_{rid}"),InlineKeyboardButton("❌ ငြင်းမယ်",callback_data=f"seller_reject_req_{rid}")],[InlineKeyboardButton("🔙 Seller Requests",callback_data="seller_requests")]]))
+    send_photo_batches(ADMIN_ID,photos,10)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("seller_publish_") and c.data != "seller_publish_cancel")
+def seller_publish(call):
+    cleanup_callback_message(call)
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True); return
+    bot.answer_callback_query(call.id)
+    rid=int(call.data.replace("seller_publish_","",1))
+    with db_lock:
+        with closing(db_connect()) as conn:
+            row=conn.execute("SELECT * FROM seller_requests WHERE id=?",(rid,)).fetchone()
+    if not row or row['status']!='accepted' or row['account_id']:
+        bot.send_message(ADMIN_ID,"❌ ဒီ Request ကို Marketplace တင်လို့မရပါ။",reply_markup=admin_keyboard()); return
+    set_state(ADMIN_ID,{"flow":"seller_publish_price","request_id":rid})
+    msg=bot.send_message(ADMIN_ID,f"📦 <b>Request #{rid}</b>\n\n🏷️ ဝယ်သူတွေမြင်မယ့် <b>Marketplace ရောင်းဈေး</b> ကို ရိုက်ပါ။\n🔐 Seller ပေးဈေး — {int(row['admin_payout_price'] or 0):,} MMK (PRIVATE)",parse_mode='HTML',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ မတင်တော့ဘူး",callback_data="seller_publish_cancel")]]))
+    bot.register_next_step_handler(msg,seller_publish_price)
+
+def seller_publish_price(message):
+    if message.from_user.id!=ADMIN_ID: return
+    state=get_state(ADMIN_ID)
+    if state.get('flow')!='seller_publish_price': return
+    try:
+        listing=int((message.text or '').replace(',','').replace(' ','').strip())
+        if listing<=0: raise ValueError
+    except Exception:
+        msg=bot.send_message(ADMIN_ID,'❌ Marketplace ဈေး မမှန်ပါ။'); bot.register_next_step_handler(msg,seller_publish_price); return
+    rid=int(state['request_id'])
+    with db_lock:
+        with closing(db_connect()) as conn:
+            row=conn.execute('SELECT * FROM seller_requests WHERE id=?',(rid,)).fetchone()
+            if not row or row['status']!='accepted' or row['account_id']:
+                clear_state(ADMIN_ID); bot.send_message(ADMIN_ID,'❌ Request မရှိတော့ပါ။',reply_markup=admin_keyboard()); return
+            photos=[x for x in (row['photos'] or '').split(',') if x][:15]
+            if not photos:
+                clear_state(ADMIN_ID); bot.send_message(ADMIN_ID,'❌ ပုံမရှိလို့ မတင်နိုင်ပါ။',reply_markup=admin_keyboard()); return
+            number=next_account_number()
+            conn.execute("""INSERT INTO accounts(id,title,skins,price,photos,status,original_price,sale_price,is_featured,seller_user_id,seller_username,seller_payout_price) VALUES(?,?,?,?,?,'available',?,NULL,0,?,?,?)""",(number,'ML Account','',listing,','.join(photos),listing,row['user_id'],row['username'],row['admin_payout_price']))
+            conn.execute("UPDATE seller_requests SET listing_price=?,account_id=? WHERE id=?",(listing,number,rid))
+            conn.commit()
+    clear_state(ADMIN_ID)
+    bot.send_message(ADMIN_ID,f"🎉 <b>{make_account_id(number)}</b> Marketplace ထဲ တင်ပြီးပါပြီ။\n🏷️ Listing — {listing:,} MMK\n🔐 Seller payout — {int(row['admin_payout_price'] or 0):,} MMK (PRIVATE)",parse_mode='HTML',reply_markup=admin_keyboard())
+
+@bot.callback_query_handler(func=lambda c: c.data == "seller_publish_cancel")
+def seller_publish_cancel(call):
+    cleanup_callback_message(call)
+    if call.from_user.id!=ADMIN_ID: return
+    bot.answer_callback_query(call.id); clear_state(ADMIN_ID); bot.send_message(ADMIN_ID,'❌ Marketplace တင်ခြင်း ပယ်ဖျက်လိုက်ပါပြီ။',reply_markup=admin_keyboard())
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("seller_approve_"))
 def seller_approve(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1381,6 +1457,7 @@ def seller_approve(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "seller_price_cancel")
 def seller_price_cancel(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         return
     bot.answer_callback_query(call.id)
@@ -1391,169 +1468,55 @@ def seller_price_cancel(call):
 def seller_set_payout(message):
     if message.from_user.id != ADMIN_ID:
         return
-
     state = get_state(ADMIN_ID)
     if state.get("flow") != "seller_set_payout":
         return
-
     try:
         payout = int((message.text or "").replace(",", "").replace(" ", "").strip())
-        if payout <= 0:
-            raise ValueError
+        if payout <= 0: raise ValueError
     except Exception:
-        msg = bot.send_message(
-            ADMIN_ID,
-            "❌ Seller ကိုပေးမယ့်ဈေး မမှန်ပါ။ ဥပမာ <code>70000</code>",
-            parse_mode="HTML"
-        )
+        msg = bot.send_message(ADMIN_ID, "❌ ဖြတ်ဈေး မမှန်ပါ။ ဥပမာ <code>70000</code>", parse_mode="HTML")
         bot.register_next_step_handler(msg, seller_set_payout)
         return
-
-    state["seller_payout_price"] = payout
-    state["flow"] = "seller_set_listing"
-    set_state(ADMIN_ID, state)
-
-    msg = bot.send_message(
-        ADMIN_ID,
-        "🏷️ <b>Marketplace မှာ ပြန်တင်ရောင်းမယ့်ဈေး</b> ကို ရိုက်ပါ။\n"
-        "ဒီဈေးက <b>PRIVATE</b> ဖြစ်ပြီး Seller ကို မပြပါ။\n\n"
-        "ဥပမာ — <code>95000</code>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ ပယ်ဖျက်မယ်", callback_data="seller_price_cancel")]
-        ])
-    )
-    bot.register_next_step_handler(msg, seller_set_listing)
-
-
-def seller_set_listing(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    state = get_state(ADMIN_ID)
-    if state.get("flow") != "seller_set_listing":
-        return
-
-    try:
-        listing = int((message.text or "").replace(",", "").replace(" ", "").strip())
-        if listing <= 0:
-            raise ValueError
-    except Exception:
-        msg = bot.send_message(
-            ADMIN_ID,
-            "❌ Marketplace ဈေး မမှန်ပါ။ ဥပမာ <code>95000</code>",
-            parse_mode="HTML"
-        )
-        bot.register_next_step_handler(msg, seller_set_listing)
-        return
-
-    request_id = state["request_id"]
-    payout = int(state["seller_payout_price"])
-
-    if listing < payout:
-        msg = bot.send_message(
-            ADMIN_ID,
-            f"❌ Marketplace ဈေး <b>{listing:,} MMK</b> က Seller ပေးဈေး "
-            f"<b>{payout:,} MMK</b> ထက် နည်းနေပါတယ်။\n"
-            "Marketplace ဈေးကို Seller ပေးဈေးထက် တူသို့မဟုတ် ပိုများအောင် ထည့်ပါ။",
-            parse_mode="HTML"
-        )
-        bot.register_next_step_handler(msg, seller_set_listing)
-        return
-
+    request_id = int(state["request_id"])
     with db_lock:
         with closing(db_connect()) as conn:
-            row = conn.execute(
-                "SELECT * FROM seller_requests WHERE id=?",
-                (request_id,)
-            ).fetchone()
-
+            row = conn.execute("SELECT * FROM seller_requests WHERE id=?", (request_id,)).fetchone()
             if not row or row["status"] != "pending":
                 clear_state(ADMIN_ID)
                 bot.send_message(ADMIN_ID, "❌ Request မရှိတော့ပါ။", reply_markup=admin_keyboard())
                 return
-
-            photos = [x for x in row["photos"].split(",") if x][:15]
-            if not photos:
-                clear_state(ADMIN_ID)
-                bot.send_message(ADMIN_ID, "❌ Request ထဲမှာ ပုံမရှိပါ။", reply_markup=admin_keyboard())
-                return
-
-            number = next_account_number()
-
-            conn.execute("""
-                INSERT INTO accounts(
-                    id, title, skins, price, photos, status,
-                    original_price, sale_price, is_featured,
-                    seller_user_id, seller_username, seller_payout_price
-                )
-                VALUES(?,?,?,?,?,'available',?,NULL,0,?,?,?)
-            """, (
-                number,
-                "ML Account",
-                "",
-                listing,
-                ",".join(photos),
-                listing,
-                row["user_id"],
-                row["username"],
-                payout
-            ))
-
-            conn.execute("""
-                UPDATE seller_requests
-                SET status='accepted',
-                    admin_payout_price=?,
-                    listing_price=?,
-                    price=?
-                WHERE id=?
-            """, (payout, listing, listing, request_id))
+            conn.execute("UPDATE seller_requests SET status='accepted', admin_payout_price=?, listing_price=NULL WHERE id=?", (payout, request_id))
             conn.commit()
-
-    account_id = make_account_id(number)
     clear_state(ADMIN_ID)
-
-    log_user_activity(
-        message.from_user,
-        "seller_publish",
-        f"request={request_id}, account={account_id}, payout={payout:,}, listing={listing:,}"
-    )
-
-    # Admin sees both prices. Seller never sees either price.
-    bot.send_message(
-        ADMIN_ID,
-        f"🎉 <b>{account_id}</b> Marketplace ထဲ တင်ပြီးပါပြီ။\n\n"
-        f"🔐 Seller ပေးဈေး — <b>{payout:,} MMK</b> (PRIVATE)\n"
-        f"🏷️ ပြန်တင်ရောင်းဈေး — <b>{listing:,} MMK</b> (PRIVATE)",
-        parse_mode="HTML",
-        reply_markup=admin_keyboard()
-    )
-
+    log_user_activity(message.from_user, "seller_accepted", f"request={request_id}, payout={payout:,}")
     try:
         seller_name = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "Admin"
-        if ADMIN_USERNAME:
-            seller_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "👑 Admin ထံ တိုက်ရိုက်ဆက်သွယ်မည်",
-                    url=f"https://t.me/{ADMIN_USERNAME}"
-                )]
-            ])
-        else:
-            seller_markup = back_button()
-
+        seller_markup = InlineKeyboardMarkup([[InlineKeyboardButton("👑 Admin နဲ့ စကားပြောမယ်", url=f"https://t.me/{ADMIN_USERNAME}")]]) if ADMIN_USERNAME else back_button()
         bot.send_message(
             row["user_id"],
-            "✅ <b>သင့်အကောင့်ကို Admin က အတည်ပြုလိုက်ပါပြီ။</b>\n\n"
-            f"👑 Admin — <b>{seller_name}</b>",
-            parse_mode="HTML",
-            reply_markup=seller_markup
+            "✅ <b>သင့်အကောင့်ကို Admin က အတည်ပြုပေးလိုက်ပါပြီ။</b>\n\n"
+            f"💰 <b>Admin က ဒီစျေးပေးပါတယ် — {payout:,} MMK</b>\n\n"
+            "ဒီစျေးက လက်ရှိ <b>ပေါက်စျေး</b> သဘောထားပါ။\n"
+            "🤝 စျေးကို ထပ်ညှိလို့ရပါတယ်။ Admin နဲ့ စကားပြောပေးပါ။\n\n"
+            f"👑 Admin — <b>{seller_name}</b>", parse_mode="HTML", reply_markup=seller_markup
         )
     except Exception:
-        logging.exception("Seller approval notification failed")
+        logging.exception("Seller offer notification failed")
+    bot.send_message(
+        ADMIN_ID,
+        f"✅ <b>Seller Request #{request_id}</b> အတည်ပြုပြီးပါပြီ။\n\n"
+        f"🔐 Seller ပေးဈေး — <b>{payout:,} MMK</b> (PRIVATE)\n"
+        "📦 Marketplace ထဲ မတင်ရသေးပါ။\n\n"
+        "လိုအပ်တဲ့အချိန်မှ Seller Requests ထဲက <b>📦 Marketplace တင်မယ်</b> ကိုနှိပ်ပြီး\n"
+        "ဝယ်သူတွေမြင်မယ့် Listing ဈေးကို သီးသန့်သတ်မှတ်နိုင်ပါတယ်။",
+        parse_mode="HTML", reply_markup=admin_keyboard()
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("seller_reject_req_"))
 def seller_reject_req(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1587,6 +1550,7 @@ def seller_reject_req(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_analysis")
 def admin_analysis(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1601,6 +1565,7 @@ def admin_analysis(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "seller_analysis")
 def seller_analysis(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1615,6 +1580,7 @@ def seller_analysis(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "recent_activity")
 def recent_activity(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1633,6 +1599,7 @@ def recent_activity(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_add")
 def admin_add(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1644,7 +1611,7 @@ def admin_add(call):
         ADMIN_ID,
         "➕ <b>အကောင့်အသစ်တင်မယ်</b>\n\n"
         "အရင်ဆုံး <b>ခေါင်းစဉ်</b> ရိုက်ပါ။\n"
-        "ပြီးရင် Account ပုံ <b>အနည်းဆုံး 10 ပုံ / အများဆုံး 15 ပုံ</b> ကို "
+        "ပြီးရင် Account ပုံ <b>အများဆုံး 15 ပုံ</b> ကို "
         "<b>တစ်ခါတည်း Album</b> အနေနဲ့ ပို့ပါ။",
         parse_mode="HTML"
     )
@@ -1668,7 +1635,7 @@ def process_admin_info(message):
     bot.send_message(
         ADMIN_ID,
         "📸 <b>ပုံအားလုံးကို တစ်ခါတည်း ပို့ပါ</b>\n\n"
-        "အနည်းဆုံး <b>10 ပုံ</b>၊ အများဆုံး <b>15 ပုံ</b> ပါ။\n"
+        "အများဆုံး <b>15 ပုံ</b> ပါ။ Admin စိတ်တိုင်းကျ ပုံအရေအတွက်နဲ့ တင်နိုင်ပါတယ်။\n"
         "အားလုံးပို့ပြီးမှ <b>ပုံအကုန်တင်ပြီးပြီ</b> ကိုနှိပ်ပါ။",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
@@ -1679,6 +1646,7 @@ def process_admin_info(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_save")
 def admin_save(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1688,14 +1656,6 @@ def admin_save(call):
 
     if state.get("flow") != "admin_photos":
         bot.answer_callback_query(call.id, "အကောင့်တင်တဲ့ Flow မရှိတော့ပါ။", show_alert=True)
-        return
-
-    if len(photos) < 10:
-        bot.answer_callback_query(
-            call.id,
-            f"အနည်းဆုံး 10 ပုံ လိုပါတယ်။ လက်ရှိ {len(photos)} ပုံပဲ ရှိပါတယ်။",
-            show_alert=True
-        )
         return
 
     bot.answer_callback_query(call.id)
@@ -1736,15 +1696,6 @@ def admin_set_price(message):
         return
 
     photos = state.get("photos", [])[:15]
-    if len(photos) < 10:
-        clear_state(ADMIN_ID)
-        bot.send_message(
-            ADMIN_ID,
-            "❌ Account မသိမ်းနိုင်ပါ။ အနည်းဆုံး 10 ပုံ လိုပါတယ်။",
-            reply_markup=admin_keyboard()
-        )
-        return
-
     account_id = save_account(
         state.get("title") or "ML Account",
         "",
@@ -1768,12 +1719,87 @@ def admin_set_price(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_cancel")
 def admin_cancel(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         return
     bot.answer_callback_query(call.id)
     clear_state(ADMIN_ID)
     bot.send_message(ADMIN_ID, "❌ မသိမ်းတော့ပါ။", reply_markup=admin_keyboard())
 
+
+# =========================================================
+# ACCOUNT MANAGEMENT (STATUS / FEATURED)
+# =========================================================
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_list")
+def admin_list(call):
+    cleanup_callback_message(call)
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True); return
+    bot.answer_callback_query(call.id)
+    accounts=get_admin_accounts()
+    if not accounts:
+        bot.send_message(ADMIN_ID,"📦 Account မရှိသေးပါ။",reply_markup=admin_keyboard()); return
+    lines=["📦 <b>ACCOUNT MANAGE</b>\nStatus / Featured / Discount ကို Account ရွေးပြီး ပြင်နိုင်ပါတယ်."]
+    buttons=[]
+    for acc in accounts[:30]:
+        lines.append(f"\n{acc['id']} — {acc['effective_price']:,} MMK — {acc['status'].upper()}")
+        buttons.append([InlineKeyboardButton(f"⚙️ {acc['id']}",callback_data=f"manage_{acc['id']}")])
+    buttons.append([InlineKeyboardButton("🏠 Admin Menu",callback_data="admin_home")])
+    bot.send_message(ADMIN_ID,"\n".join(lines),parse_mode='HTML',reply_markup=InlineKeyboardMarkup(buttons))
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("manage_"))
+def admin_manage_account(call):
+    cleanup_callback_message(call)
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id,"Admin သာ အသုံးပြုနိုင်ပါတယ်။",show_alert=True); return
+    bot.answer_callback_query(call.id)
+    aid=call.data.replace('manage_','',1); acc=get_account_by_text_id(aid)
+    if not acc:
+        bot.send_message(ADMIN_ID,'❌ Account မတွေ့ပါ။',reply_markup=admin_keyboard()); return
+    bot.send_message(ADMIN_ID,format_account(acc),parse_mode='HTML',reply_markup=account_action_keyboard(acc,admin=True,include_menu=True))
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("status_"))
+def admin_status_change(call):
+    cleanup_callback_message(call)
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id,"Admin သာ အသုံးပြုနိုင်ပါတယ်။",show_alert=True); return
+    parts=call.data.split('_',2)
+    if len(parts)!=3: return
+    status,aid=parts[1],parts[2]
+    if status not in ('available','reserved','sold','hidden'): return
+    acc=get_account_by_text_id(aid)
+    if not acc:
+        bot.answer_callback_query(call.id,'Account မတွေ့ပါ။',show_alert=True); return
+    with db_lock:
+        with closing(db_connect()) as conn:
+            conn.execute('UPDATE accounts SET status=? WHERE id=?',(status,acc['db_id'])); conn.commit()
+    bot.answer_callback_query(call.id,'Status ပြောင်းပြီးပါပြီ')
+    updated=get_account_by_text_id(aid)
+    bot.send_message(ADMIN_ID,format_account(updated),parse_mode='HTML',reply_markup=account_action_keyboard(updated,admin=True,include_menu=True))
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("featured_"))
+def admin_featured_toggle(call):
+    cleanup_callback_message(call)
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id,'Admin သာ အသုံးပြုနိုင်ပါတယ်။',show_alert=True); return
+    aid=call.data.replace('featured_','',1); acc=get_account_by_text_id(aid)
+    if not acc:
+        bot.answer_callback_query(call.id,'Account မတွေ့ပါ။',show_alert=True); return
+    new_value=0 if acc['is_featured'] else 1
+    with db_lock:
+        with closing(db_connect()) as conn:
+            conn.execute('UPDATE accounts SET is_featured=? WHERE id=?',(new_value,acc['db_id'])); conn.commit()
+    bot.answer_callback_query(call.id,'Featured ပြောင်းပြီးပါပြီ')
+    updated=get_account_by_text_id(aid)
+    bot.send_message(ADMIN_ID,format_account(updated),parse_mode='HTML',reply_markup=account_action_keyboard(updated,admin=True,include_menu=True))
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_home")
+def admin_home(call):
+    cleanup_callback_message(call)
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id,'Admin သာ အသုံးပြုနိုင်ပါတယ်။',show_alert=True); return
+    bot.answer_callback_query(call.id); clear_state(ADMIN_ID); bot.send_message(ADMIN_ID,'👑 <b>ADMIN PANEL</b>',parse_mode='HTML',reply_markup=admin_keyboard())
 
 # =========================================================
 # DISCOUNT
@@ -1784,6 +1810,7 @@ def admin_cancel(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("discount_remove_"))
 def admin_discount_remove(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1817,45 +1844,21 @@ def admin_discount_list(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
-
     bot.answer_callback_query(call.id)
     accounts = get_admin_accounts(status="available")
-
     if not accounts:
-        bot.send_message(
-            ADMIN_ID,
-            "📦 လက်ရှိ Available Account မရှိသေးပါ။",
-            reply_markup=admin_keyboard()
-        )
+        bot.send_message(ADMIN_ID, "📦 Available Account မရှိသေးပါ။", reply_markup=admin_keyboard())
         return
-
-    bot.send_message(
-        ADMIN_ID,
-        "💸 <b>လျော့စျေးတင်/ပြင်/ဖြုတ်ရန် Account ရွေးပါ</b>",
-        parse_mode="HTML"
-    )
-
-    for acc in accounts[:30]:
-        buttons = [[
-            InlineKeyboardButton(
-                "💸 လျော့စျေးသတ်မှတ် / ပြင်မယ်",
-                callback_data=f"discount_{acc['id']}"
-            )
-        ]]
+    buttons=[]
+    lines=["💸 <b>လျော့စျေး စီမံမယ်</b>\nAccount ကိုရွေးပြီး လျော့စျေးတင် / ပြင် / ဖြုတ်နိုင်ပါတယ်။"]
+    for acc in accounts[:40]:
         if acc["is_discounted"]:
-            buttons.append([
-                InlineKeyboardButton(
-                    "❌ လျော့စျေးဖြုတ်မယ်",
-                    callback_data=f"discount_remove_{acc['id']}"
-                )
-            ])
-
-        bot.send_message(
-            ADMIN_ID,
-            format_account(acc),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+            label=f"💸 {acc['id']} — {acc['effective_price']:,} MMK (လျော့ထား)"
+        else:
+            label=f"💰 {acc['id']} — {acc['price']:,} MMK"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"discount_{acc['id']}")])
+    buttons.append([InlineKeyboardButton("🏠 Admin Menu", callback_data="admin_home")])
+    bot.send_message(ADMIN_ID,"\n".join(lines),parse_mode="HTML",reply_markup=InlineKeyboardMarkup(buttons))
 
 
 @bot.callback_query_handler(
@@ -1864,6 +1867,7 @@ def admin_discount_list(call):
     and not c.data.startswith("discount_remove_")
 )
 def admin_discount_start(call):
+    cleanup_callback_message(call)
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
         return
@@ -1963,6 +1967,7 @@ def admin_discount_price(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "discount_menu")
 def discount_menu(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     accounts = get_discounted_accounts()
     log_user_activity(call.from_user, "discount_browse", f"count={len(accounts)}")
@@ -2018,6 +2023,7 @@ TIPS = {
 
 @bot.callback_query_handler(func=lambda c: c.data == "tips_menu")
 def tips_menu(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
     bot.send_message(
         call.message.chat.id,
@@ -2030,6 +2036,7 @@ def tips_menu(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("tip_"))
 def tip_detail(call):
+    cleanup_callback_message(call)
     bot.answer_callback_query(call.id)
 
     try:
@@ -2113,7 +2120,7 @@ def fallback_text(message):
         "sell_photos", "sell_error", "sell_error_text", "sell_binding",
         "sell_moonton", "sell_estimated_price",
         "admin_info", "admin_photos", "admin_set_price",
-        "seller_set_payout", "seller_set_listing", "discount_price",
+        "seller_set_payout", "seller_publish_price", "discount_price",
     ):
         return
     if flow in ("buy_skin_custom", "buy_budget_custom"):
@@ -2150,4 +2157,4 @@ else:
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
