@@ -18,6 +18,7 @@ acc_counter = 1
 def home():
     return "Bot is running 24/7 successfully! 🚀"
 
+# Bot Response မြန်ဆန်စေရန် Webhook Optimization
 @app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
@@ -31,7 +32,7 @@ def webhook():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
-    user_data[user_id] = {} # Clear previous states
+    user_data[user_id] = {} 
     
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -69,41 +70,28 @@ def go_home(call):
         )
     bot.send_message(user_id, "🏠 ပင်မ Menu သို့ ပြန်ရောက်ပါပြီ ⚡️", reply_markup=markup)
 
-# 2. BUY FLOW (Multiple Choice + Direct Text Input for Skin & Budget)
+# 2. BUY FLOW (Skin နှင့် Budget ကို စာရိုက်ရှာနိုင်ခြင်း)
 @bot.callback_query_handler(func=lambda call: call.data == "buy_acc")
 def buy_step1(call):
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("✨ Collector Skin 👑", callback_data="skin_Collector"),
-        InlineKeyboardButton("🌟 Legend Skin 💎", callback_data="skin_Legend"),
-        InlineKeyboardButton("🔥 Hero / Prime ⚡️", callback_data="skin_Hero"),
-        InlineKeyboardButton("🌈 အကုန်လုံး ကြည့်မည် 🚀", callback_data="skin_all")
-    )
-    bot.send_message(call.message.chat.id, "❓ ကြိုက်နှစ်သက်သော Skin အမျိုးအစား ကို ရွေးချယ်ပါ (သို့မဟုတ် အောက်ပါခလုတ်များမှ ရွေးပါ) 🎯", reply_markup=markup)
+    msg = bot.send_message(call.message.chat.id, "✨ ကျေးဇူးပြု၍ ရှာလိုသော **Skin နာမည်** (ဥပမာ - Collector, Gusion, Alucard စသည်ဖြင့်) ကို တိုက်ရိုက် စာရိုက် ပို့ပေးပါ ✍️")
+    bot.register_next_step_handler(msg, process_skin_text_input)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("skin_"))
-def buy_step2(call):
-    user_id = call.message.chat.id
-    skin_choice = call.data.replace("skin_", "")
+def process_skin_text_input(message):
+    user_id = message.chat.id
+    skin_keyword = message.text.lower().strip()
+    user_data[user_id] = {'skin_keyword': skin_keyword}
     
-    if skin_choice == "all":
-        user_data[user_id]['skin_keyword'] = ""
-    else:
-        user_data[user_id]['skin_keyword'] = skin_choice.lower()
-        
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("💰 50,000 MMK အောက် 📉", callback_data="budget_50000"),
-        InlineKeyboardButton("💰 150,000 MMK အောက် 📊", callback_data="budget_150000"),
-        InlineKeyboardButton("💰 300,000 MMK အောက် 📈", callback_data="budget_300000"),
-        InlineKeyboardButton("💎 Budget အကန့်အသတ်မရှိ 🚀", callback_data="budget_9999999")
-    )
-    bot.send_message(user_id, "💰 အသုံးပြုလိုသော Budget ပမာဏကို ရွေးချယ်ပါ (သို့မဟုတ် တိကျသောငွေပမာဏကို စာရိုက်ပေးပို့နိုင်ပါသည်) 🎯", reply_markup=markup)
+    msg = bot.send_message(user_id, "💰 ကျေးဇူးပြု၍ သုံးစွဲလိုသော **ငွေပမာဏ (Budget)** ကို ဂဏန်းဖြင့် တိုက်ရိုက် ရိုက်ထည့်ပေးပါ ✍️\n(ဥပမာ - 50000 သို့မဟုတ် 150000)")
+    bot.register_next_step_handler(msg, process_budget_text_input)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("budget_"))
-def buy_step3(call):
-    user_id = call.message.chat.id
-    max_price = int(call.data.replace("budget_", ""))
+def process_budget_text_input(message):
+    user_id = message.chat.id
+    try:
+        max_price = int(message.text.replace(",", "").strip())
+    except ValueError:
+        bot.send_message(user_id, "⚠️ ကျေးဇူးပြု၍ မှန်ကန်သော ငွေပမာဏ ဂဏန်းကိုသာ ရိုက်ထည့်ပေးပါ ❌ /start ဖြင့် ပြန်စပါ။")
+        return
+        
     skin_keyword = user_data.get(user_id, {}).get('skin_keyword', '')
     
     matched = []
@@ -131,7 +119,7 @@ def buy_step3(call):
         else:
             bot.send_message(user_id, text, reply_markup=markup)
 
-# 3. BROWSE ACCOUNTS (ပလေယာအား အကောင့်ပြခြင်း - Banner လုံးဝမပါ၊ ပုံစစ်စစ်များသာ)
+# 3. BROWSE ACCOUNTS (Banner ပုံများ လုံးဝမပါ၊ ပုံစစ်စစ် ၅ ပုံသာပြသမည်)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("browse_acc_"))
 def browse_accounts(call):
     idx = int(call.data.split("_")[2])
@@ -149,6 +137,7 @@ def browse_accounts(call):
     acc_id = acc_keys[idx]
     acc = accounts_db[acc_id]
     
+    # ဓာတ်ပုံစစ်စစ်များကိုသာ အတိအကျပြသခြင်း (Banner လုံးဝမပါ)
     photos = acc['photos'][:5]
     if photos:
         media = [telebot.types.InputMediaPhoto(p) for p in photos]
@@ -236,7 +225,7 @@ def sell_step2_error(call):
         InlineKeyboardButton("💰 200,000 MMK 📈", callback_data="price_200000"),
         InlineKeyboardButton("💰 300,000 MMK+ 🔥", callback_data="price_300000+")
     )
-    bot.send_message(user_id, "💰 အဆင့် (၃/၃) ⚡️\n\nသင် ရောင်းချလိုသော ခန့်မှန်း ဈေးနှုန်း ကို ရွေးချယ်ပါ 👇", reply_markup=markup)
+    bot.send_message(user_id, "💰 အဆင့် (၃/၃) ⚡️\n\nသင် ရောင်းချလိုသော ခန့်မှန်း ဈေးနှုန်း ကို ရွေးချယ်ပေးပါ 👇", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
 def sell_step3_price(call):
@@ -262,7 +251,18 @@ def sell_step3_price(call):
         media = [telebot.types.InputMediaPhoto(p) for p in data['photos'][:30]]
         bot.send_media_group(ADMIN_ID, media)
 
-# 5. ADMIN FEATURES (ရေရှည်သိမ်းဆည်းရန်နှင့် အကောင့်စီမံရန်)
+# 5. ADMIN FEATURES (အကောင့်အသစ်တင်ရန် / လက်ကျန်ကြည့်ရန် - ရေရှည်သိမ်းဆည်းမည်)
+@bot.message_handler(commands=['admin'])
+def admin_command(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("👑 အကောင့်အသစ်တင်ရန် ➕", callback_data="admin_add_acc"),
+        InlineKeyboardButton("📊 လက်ကျန်အကောင့်များကြည့်ရန် 📂", callback_data="admin_view_acc")
+    )
+    bot.send_message(ADMIN_ID, "👑 [Admin Panel] ⚡️ လိုအပ်သည်များကို ရွေးချယ်ပါ ခင်ဗျာ။", reply_markup=markup)
+
 @bot.callback_query_handler(func=lambda call: call.data == "admin_add_acc")
 def admin_add_account(call):
     if call.message.chat.id != ADMIN_ID:
@@ -289,7 +289,7 @@ def process_admin_info(message):
         msg = bot.send_message(ADMIN_ID, f"📸 {acc_id} အတွက် ဓာတ်ပုံများကို ဆက်တိုက် ပို့ပေးပါ ⚡️\nပုံများကုန်ပါက အောက်ပါခလုတ်ကို နှိပ်ပါ 👇", reply_markup=markup)
         bot.register_next_step_handler(msg, process_admin_photos_loop)
     except Exception:
-        bot.send_message(ADMIN_ID, "⚠️ Format မှားနေပါသည် ❌ /start ဖြင့် ပြန်စပါ။")
+        bot.send_message(ADMIN_ID, "⚠️ Format မှားနေပါသည် ❌ /admin ဖြင့် ပြန်စပါ။")
 
 def process_admin_photos_loop(message):
     if message.photo and ADMIN_ID in user_data:
