@@ -2,6 +2,7 @@ import os
 import sqlite3
 import threading
 import logging
+import re
 from contextlib import closing
 
 import telebot
@@ -81,6 +82,36 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT NOT NULL DEFAULT '',
+                    first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL,
+                    details TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS seller_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    error_info TEXT NOT NULL DEFAULT '',
+                    price INTEGER NOT NULL,
+                    photo_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             conn.commit()
@@ -209,23 +240,128 @@ def search_accounts(skin_keyword="", max_price=None):
 
 
 # =========================================================
+# ANALYTICS / ACTIVITY
+# =========================================================
+
+def log_user_activity(user, action, details=""):
+    user_id = int(user.id)
+    username = user.username or ""
+    with db_lock:
+        with closing(db_connect()) as conn:
+            conn.execute("""
+                INSERT INTO users(user_id, username, first_seen, last_seen)
+                VALUES(?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username=excluded.username,
+                    last_seen=CURRENT_TIMESTAMP
+            """, (user_id, username))
+            conn.execute("""
+                INSERT INTO activity(user_id, username, action, details)
+                VALUES(?, ?, ?, ?)
+            """, (user_id, username, action, details))
+            conn.commit()
+
+
+def record_seller_request(user_id, username, error_info, price, photo_count):
+    with db_lock:
+        with closing(db_connect()) as conn:
+            cur = conn.execute("""
+                INSERT INTO seller_requests(
+                    user_id, username, error_info, price, photo_count, status
+                ) VALUES(?, ?, ?, ?, ?, 'pending')
+            """, (user_id, username, error_info, price, photo_count))
+            conn.commit()
+            return cur.lastrowid
+
+
+def admin_analysis_text():
+    with db_lock:
+        with closing(db_connect()) as conn:
+            total_users = conn.execute(
+                "SELECT COUNT(*) AS n FROM users"
+            ).fetchone()["n"]
+            active_24h = conn.execute("""
+                SELECT COUNT(*) AS n FROM users
+                WHERE last_seen >= datetime('now', '-1 day')
+            """).fetchone()["n"]
+            total_events = conn.execute(
+                "SELECT COUNT(*) AS n FROM activity"
+            ).fetchone()["n"]
+            pending_sellers = conn.execute("""
+                SELECT COUNT(*) AS n FROM seller_requests
+                WHERE status='pending'
+            """).fetchone()["n"]
+            accepted_sellers = conn.execute("""
+                SELECT COUNT(*) AS n FROM seller_requests
+                WHERE status='accepted'
+            """).fetchone()["n"]
+            stock = conn.execute("""
+                SELECT COUNT(*) AS n FROM accounts
+                WHERE status='available'
+            """).fetchone()["n"]
+    return (
+        "📊 <b>BOT ANALYSIS</b>\n\n"
+        f"👥 Bot သုံးဖူးသူ — <b>{total_users:,}</b> ယောက်\n"
+        f"🟢 24 နာရီအတွင်း Active — <b>{active_24h:,}</b> ယောက်\n"
+        f"🧾 Activity စုစုပေါင်း — <b>{total_events:,}</b> ကြိမ်\n"
+        f"📦 လက်ကျန် Account — <b>{stock:,}</b> ခု\n"
+        f"⏳ Seller Pending — <b>{pending_sellers:,}</b> ယောက်\n"
+        f"✅ Seller Accepted — <b>{accepted_sellers:,}</b> ယောက်"
+    )
+
+
+def seller_analysis_text():
+    with db_lock:
+        with closing(db_connect()) as conn:
+            rows = conn.execute("""
+                SELECT username, user_id, price, photo_count, status, created_at
+                FROM seller_requests
+                ORDER BY id DESC
+                LIMIT 15
+            """).fetchall()
+    if not rows:
+        return "💰 <b>SELLER ANALYSIS</b>\n\nလက်ရှိ Seller record မရှိသေးပါ။"
+    lines = ["💰 <b>SELLER ANALYSIS</b>\n"]
+    for i, r in enumerate(rows, 1):
+        name = f"@{r['username']}" if r["username"] else f"ID {r['user_id']}"
+        lines.append(
+            f"{i}. {name} — {r['price']:,} MMK — "
+            f"{r['photo_count']} ပုံ — {r['status']}"
+        )
+    return "\n".join(lines)
+
+
+def recent_activity_text():
+    with db_lock:
+        with closing(db_connect()) as conn:
+            rows = conn.execute("""
+                SELECT username, user_id, action, details, created_at
+                FROM activity
+                ORDER BY id DESC
+                LIMIT 20
+            """).fetchall()
+    if not rows:
+        return "🕒 <b>RECENT ACTIVITY</b>\n\nActivity မရှိသေးပါ။"
+    lines = ["🕒 <b>RECENT ACTIVITY</b>\n"]
+    for r in rows:
+        name = f"@{r['username']}" if r["username"] else f"ID {r['user_id']}"
+        extra = f" — {r['details']}" if r["details"] else ""
+        lines.append(f"• {name} — {r['action']}{extra}")
+    return "\n".join(lines)
+
+
+# =========================================================
 # UI HELPERS
 # =========================================================
 
 def main_menu(user_id):
-    markup = InlineKeyboardMarkup(row_width=1)
+    markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("🛒 အကောင့်ဝယ်မည် 💎", callback_data="buy_menu"),
-        InlineKeyboardButton("👀 အကောင့်တွေကြည့်မယ် 🚀", callback_data="browse_0"),
-        InlineKeyboardButton("💰 အကောင့်ရောင်းမည် 🔥", callback_data="sell_start"),
-        InlineKeyboardButton("💡 အသုံးဝင်တဲ့ Tips ၅ ခု 📌", callback_data="tips_menu"),
+        InlineKeyboardButton("🛒 အကောင့်ဝယ်မည်", callback_data="buy_menu"),
+        InlineKeyboardButton("👀 အကောင့်ကြည့်မယ်", callback_data="browse_0"),
+        InlineKeyboardButton("💰 အကောင့်ရောင်းမည်", callback_data="sell_start"),
+        InlineKeyboardButton("💡 Tips ၅ ခု", callback_data="tips_menu"),
     )
-
-    if user_id == ADMIN_ID:
-        markup.add(
-            InlineKeyboardButton("👑 [ADMIN] အကောင့်အသစ်တင်ရန် ➕", callback_data="admin_add"),
-            InlineKeyboardButton("📊 [ADMIN] လက်ကျန်အကောင့်များ 📂", callback_data="admin_list"),
-        )
     return markup
 
 
@@ -238,17 +374,9 @@ def back_button():
 
 
 def buy_menu_keyboard():
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        InlineKeyboardButton("🌈 အကုန်လုံးကြည့်မယ်", callback_data="buy_all_skin"),
-        InlineKeyboardButton("✨ Collector", callback_data="skin_Collector"),
-        InlineKeyboardButton("🔥 Epic", callback_data="skin_Epic"),
-        InlineKeyboardButton("💎 Legend", callback_data="skin_Legend"),
-        InlineKeyboardButton("⌨️ ကိုယ်လိုချင်တဲ့ Skin နာမည် ရိုက်မယ်", callback_data="skin_custom"),
-        InlineKeyboardButton("💰 Budget ရွေးမယ်", callback_data="budget_menu"),
-        InlineKeyboardButton("🔙 ပင်မ Menu သို့ပြန်မည် 🏠", callback_data="home"),
-    )
-    return markup
+    # Kept for compatibility with older callback messages.
+    # New users now get a single text-input buy flow.
+    return None
 
 
 def budget_keyboard():
@@ -281,11 +409,14 @@ def tips_keyboard():
 
 
 def admin_keyboard():
-    markup = InlineKeyboardMarkup(row_width=1)
+    markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("➕ အကောင့်အသစ်တင်ရန်", callback_data="admin_add"),
-        InlineKeyboardButton("📂 လက်ကျန်အကောင့်များကြည့်ရန်", callback_data="admin_list"),
-        InlineKeyboardButton("🔙 ပင်မ Menu", callback_data="home"),
+        InlineKeyboardButton("➕ အကောင့်တင်မယ်", callback_data="admin_add"),
+        InlineKeyboardButton("📦 လက်ကျန်အကောင့်", callback_data="admin_list"),
+        InlineKeyboardButton("📊 Bot Analysis", callback_data="admin_analysis"),
+        InlineKeyboardButton("💰 Seller Analysis", callback_data="seller_analysis"),
+        InlineKeyboardButton("🕒 Recent Activity", callback_data="recent_activity"),
+        InlineKeyboardButton("🏠 Main Menu", callback_data="home"),
     )
     return markup
 
@@ -410,6 +541,7 @@ def telegram_webhook():
 @bot.message_handler(commands=["start"])
 def start_command(message):
     clear_state(message.from_user.id)
+    log_user_activity(message.from_user, "start")
     text = (
         "👋 မင်္ဂလာပါ 🎮 <b>Gaming Shop Bot</b> မှ ကြိုဆိုပါတယ်။\n\n"
         "အောက်က Menu ကနေ လိုချင်တာကို ရွေးနိုင်ပါတယ်။\n"
@@ -455,14 +587,18 @@ def callback_home(call):
 @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
 def buy_menu(call):
     bot.answer_callback_query(call.id)
-    set_state(call.from_user.id, {"flow": "buy"})
+    set_state(call.from_user.id, {"flow": "buy_query"})
+    log_user_activity(call.from_user, "buy_menu")
     bot.send_message(
         call.message.chat.id,
         "🛒 <b>အကောင့်ဝယ်မည်</b>\n\n"
-        "✨ Skin ကို အောက်က Menu ကနေ ရွေးပါ။\n"
-        "⌨️ ကိုယ်လိုချင်တဲ့ Skin နာမည်ကိုလည်း Menu ထဲကနေ တိုက်ရိုက် ရိုက်ထည့်နိုင်ပါတယ်။",
-        parse_mode="HTML",
-        reply_markup=buy_menu_keyboard()
+        "ဘာ Skin လိုချင်လဲ + ဘယ်လောက်သုံးမလဲ ကို "
+        "<b>တစ်ကြောင်းတည်း</b> ရိုက်ပို့ပါ။\n\n"
+        "ဥပမာ:\n"
+        "<code>Gusion | 200000</code>\n"
+        "<code>Collector | 150000</code>\n"
+        "<code>All | 300000</code>",
+        parse_mode="HTML"
     )
 
 
@@ -607,6 +743,7 @@ def browse_index(user_id):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("browse_") and c.data not in ("browse_next",))
 def browse_accounts(call):
     bot.answer_callback_query(call.id)
+    log_user_activity(call.from_user, "browse")
 
     try:
         idx = int(call.data.replace("browse_", ""))
@@ -736,6 +873,7 @@ def buy_confirm(call):
 @bot.callback_query_handler(func=lambda c: c.data == "sell_start")
 def sell_start(call):
     bot.answer_callback_query(call.id)
+    log_user_activity(call.from_user, "sell_start")
 
     set_state(call.from_user.id, {
         "flow": "sell_photos",
@@ -875,6 +1013,14 @@ def receive_sell_price(message):
     username = message.from_user.username or "No Username"
     photos = state.get("photos", [])
     error_info = state.get("error_info", "N/A")
+    seller_request_id = record_seller_request(
+        user_id, username, error_info, price, len(photos)
+    )
+    log_user_activity(
+        message.from_user,
+        "seller_submit",
+        f"request={seller_request_id}, price={price:,}"
+    )
 
     admin_text = (
         "📥 <b>အကောင့်လာရောင်းသူ ရှိပါသည်</b>\n\n"
@@ -924,6 +1070,19 @@ def seller_accept(call):
 
     bot.answer_callback_query(call.id, "Accepted")
     user_id = int(call.data.replace("seller_accept_", ""))
+    with db_lock:
+        with closing(db_connect()) as conn:
+            conn.execute("""
+                UPDATE seller_requests
+                SET status='accepted'
+                WHERE id = (
+                    SELECT id FROM seller_requests
+                    WHERE user_id=? AND status='pending'
+                    ORDER BY id DESC LIMIT 1
+                )
+            """, (user_id,))
+            conn.commit()
+    log_user_activity(call.from_user, "seller_accept", f"user={user_id}")
 
     bot.send_message(
         ADMIN_ID,
@@ -944,6 +1103,19 @@ def seller_reject(call):
 
     bot.answer_callback_query(call.id, "Rejected")
     user_id = int(call.data.replace("seller_reject_", ""))
+    with db_lock:
+        with closing(db_connect()) as conn:
+            conn.execute("""
+                UPDATE seller_requests
+                SET status='rejected'
+                WHERE id = (
+                    SELECT id FROM seller_requests
+                    WHERE user_id=? AND status='pending'
+                    ORDER BY id DESC LIMIT 1
+                )
+            """, (user_id,))
+            conn.commit()
+    log_user_activity(call.from_user, "seller_reject", f"user={user_id}")
 
     bot.send_message(
         ADMIN_ID,
@@ -953,6 +1125,48 @@ def seller_reject(call):
     bot.send_message(
         user_id,
         "❌ Admin က သင့်အကောင့်ရောင်းရန်တင်ထားတာကို လက်ရှိမှာ ငြင်းပယ်ထားပါတယ်။"
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_analysis")
+def admin_analysis(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        ADMIN_ID,
+        admin_analysis_text(),
+        parse_mode="HTML",
+        reply_markup=admin_keyboard()
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "seller_analysis")
+def seller_analysis(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        ADMIN_ID,
+        seller_analysis_text(),
+        parse_mode="HTML",
+        reply_markup=admin_keyboard()
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "recent_activity")
+def recent_activity(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        ADMIN_ID,
+        recent_activity_text(),
+        parse_mode="HTML",
+        reply_markup=admin_keyboard()
     )
 
 
@@ -1240,14 +1454,55 @@ def tip_detail(call):
 def fallback_text(message):
     user_id = message.from_user.id
     state = get_state(user_id)
+    flow = state.get("flow")
+
+    if flow == "buy_query":
+        raw = message.text.strip()
+        parts = [x.strip() for x in raw.split("|", 1)]
+
+        if len(parts) != 2:
+            # Also accept: "Gusion 200000"
+            m = re.match(r"^(.*?)\s+([0-9][0-9, ]*)\s*$", raw)
+            if m:
+                parts = [m.group(1).strip(), m.group(2).strip()]
+
+        if len(parts) != 2:
+            bot.send_message(
+                user_id,
+                "❌ Format မမှန်ပါ။\n\n"
+                "ဒီလို ရိုက်ပို့ပါ:\n"
+                "<code>Gusion | 200000</code>\n"
+                "သို့မဟုတ် <code>Collector 150000</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        skin = parts[0].strip()
+        budget_text = parts[1].replace(",", "").replace(" ", "")
+        try:
+            budget = int(budget_text)
+            if budget <= 0:
+                raise ValueError
+        except ValueError:
+            bot.send_message(user_id, "❌ Budget ကို ဂဏန်းနဲ့ ထည့်ပါ။ ဥပမာ 200000")
+            return
+
+        clear_state(user_id)
+        log_user_activity(
+            message.from_user,
+            "buy_search",
+            f"{skin} | {budget:,}"
+        )
+        results = search_accounts(skin, budget)
+        send_search_results(user_id, results)
+        return
 
     # next_step_handler normally handles active text input first.
-    # This is only a friendly fallback.
-    if state.get("flow") == "sell_price":
+    if flow == "sell_price":
         return
-    if state.get("flow") == "admin_info":
+    if flow == "admin_info":
         return
-    if state.get("flow") in ("buy_skin_custom", "buy_budget_custom"):
+    if flow in ("buy_skin_custom", "buy_budget_custom"):
         return
 
     bot.send_message(
