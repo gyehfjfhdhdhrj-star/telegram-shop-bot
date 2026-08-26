@@ -456,12 +456,8 @@ def recent_activity_text():
 # =========================================================
 
 def cleanup_callback_message(call):
-    """Best-effort cleanup; NEVER call this function recursively."""
-    try:
-        if call.message and call.message.chat and call.message.message_id:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        logging.debug("Callback message cleanup skipped", exc_info=True)
+    """Message cleanup disabled: keep all existing Telegram messages visible."""
+    return
 
 
 def schedule_photo_prompt(user_id, flow, delay=3.0):
@@ -667,15 +663,8 @@ def send_photo_batches(chat_id, photos, batch_size=10):
 
 
 def _clear_account_display(user_id):
-    state=get_state(user_id).copy()
-    ids=list(state.get("display_messages",[]))
-    for mid in ids:
-        try:
-            bot.delete_message(user_id, mid)
-        except Exception:
-            pass
-    state.pop("display_messages",None)
-    set_state(user_id,state)
+    """Old message deletion is intentionally disabled. Keep all account messages."""
+    return
 
 
 def _track_account_display(user_id, messages):
@@ -728,7 +717,7 @@ def send_search_result_at(chat_id, user_id, results, index=0):
     markup=InlineKeyboardMarkup(row_width=2)
     markup.row(InlineKeyboardButton("⬅️ အရင်",callback_data="search_prev"),InlineKeyboardButton("နောက် ➡️",callback_data="search_next"))
     markup.add(InlineKeyboardButton("🏠 ပင်မ Menu",callback_data="home"))
-    bot.send_message(chat_id,"🔎 <b>Search Navigation</b>",parse_mode="HTML",reply_markup=markup)
+    bot.send_message(chat_id,"🔎 <b>ရှာဖွေမှုအကောင့်များ ပြောင်းကြည့်ရန်</b>",parse_mode="HTML",reply_markup=markup)
 
 
 def send_search_results(chat_id, results):
@@ -1745,8 +1734,37 @@ def process_admin_info(message):
     title = (message.text or "").strip() or "ML Account"
 
     set_state(ADMIN_ID, {
-        "flow": "admin_photos",
+        "flow": "admin_skin",
         "title": title,
+        "skins": "",
+        "photos": [],
+        "photo_prompt_sent": False,
+    })
+
+    msg = bot.send_message(
+        ADMIN_ID,
+        "✨ <b>Skin အချက်အလက်</b> ကို ရိုက်ထည့်ပါ။\n\n"
+        "ဥပမာ — <code>Gusion Collector, Alucard Legend, 50+ Skins</code>\n"
+        "Skin မရှိရင် <code>မရှိ</code> လို့ ရိုက်နိုင်ပါတယ်။",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ မသိမ်းဘူး", callback_data="admin_cancel")]
+        ])
+    )
+    bot.register_next_step_handler(msg, process_admin_skin)
+
+
+@bot.message_handler(
+    func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("flow") == "admin_skin",
+    content_types=["text"]
+)
+def process_admin_skin(message):
+    skins = (message.text or "").strip() or "မရှိ"
+
+    set_state(ADMIN_ID, {
+        **get_state(ADMIN_ID),
+        "flow": "admin_photos",
+        "skins": skins,
         "photos": [],
         "photo_prompt_sent": False,
     })
@@ -1817,7 +1835,7 @@ def admin_set_price(message):
     photos = state.get("photos", [])[:15]
     account_id = save_account(
         state.get("title") or "ML Account",
-        "",
+        state.get("skins") or "မရှိ",
         price,
         photos,
         original_price=price,
@@ -1829,6 +1847,7 @@ def admin_set_price(message):
     bot.send_message(
         ADMIN_ID,
         f"🎉 <b>{account_id}</b> တင်ပြီးပါပြီ။\n"
+        f"✨ Skin — {state.get('skins') or 'မရှိ'}\n"
         f"💰 {price:,} MMK\n"
         f"📸 {len(photos)} ပုံ",
         parse_mode="HTML",
