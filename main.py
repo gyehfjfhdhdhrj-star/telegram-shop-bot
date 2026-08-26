@@ -12,10 +12,10 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMedia
 # CONFIG
 # =========================================================
 # Render Environment Variables မှာ သတ်မှတ်ပါ:
-# TELEGRAM_TOKEN = 8892803898:AAFWqTsr8GiHZ2Vr_ud9LttPp6I3qfmo-ew
-# ADMIN_ID       = 7267372257
-# ADMIN_USERNAME = AUNGGYIW
-# PUBLIC_URL     = https://dashboard.render.com/web/srv-da66s26417fc739h0m1g/deploys/dep-da79n2gae00c73b5h8u0?r=2026-08-26%4007%3A52%3A46%7E2026-08-26%4007%3A55%3A28
+# TELEGRAM_TOKEN = BotFather token
+# ADMIN_ID       = သင့် Telegram numeric user ID
+# ADMIN_USERNAME = @username (optional, @ မပါဘဲထည့်လည်းရ)
+# PUBLIC_URL     = https://your-service.onrender.com
 # DB_PATH        = /var/data/shop.db  (Render Persistent Disk သုံးရင်)
 #
 # SECURITY: Token ကို code ထဲ မထည့်ပါနဲ့။
