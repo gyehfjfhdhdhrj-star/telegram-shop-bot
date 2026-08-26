@@ -1259,251 +1259,227 @@ def fallback_text(message):
 
 
 # =========================================================
-# PREMIUM UI + DISPLAY CLEANUP UPDATE (APPENDED ONLY)
+# PREMIUM UI UPDATE (ADDITIVE ONLY)
 # =========================================================
-# ဒီ section က အပေါ်က မူရင်း code ကို မဖျက်၊ မပြင်ပါ။
-# Existing callback_data / database structure / account photo order ကို မပြောင်းပါ။
-#
-# 1) Account ကြည့်တဲ့အခါ အရင် account ရဲ့ ပုံ + စာတွေကို ဖျက်ပြီး အသစ်ပြမယ်။
-# 2) Admin တင်ထားတဲ့ photos list order အတိုင်း Telegram media group အစဉ်မပြောင်းဘဲ ပို့မယ်။
-# 3) Premium-style UI ကို existing menu callback_data တွေမပြောင်းဘဲ overlay လုပ်မယ်။
-# =========================================================
+# ဒီ block က အပေါ်က မူရင်း function / handler / database code တွေကို
+# ဖျက်ခြင်း၊ အစားထိုးခြင်း မလုပ်ဘဲ UI ပိုင်းကိုသာ ထပ်တိုးထားတာပါ။
+
+premium_messages = {}
+premium_messages_lock = threading.Lock()
 
 
-def _premium_delete_previous_display(user_id, extra_message_id=None):
-    """Delete previously displayed bot messages for this user's account view."""
-    state = get_state(user_id).copy()
-    old_ids = list(state.get("display_messages", []))
-    if extra_message_id:
-        old_ids.append(extra_message_id)
+def premium_track(chat_id, message_ids):
+    """လက်ရှိ Account UI ရဲ့ photo/message IDs တွေကို မှတ်ထားပါ။"""
+    ids = [int(x) for x in (message_ids or []) if x]
+    if not ids:
+        return
+    with premium_messages_lock:
+        old = premium_messages.get(chat_id, [])
+        premium_messages[chat_id] = list(dict.fromkeys(old + ids))[-40:]
 
-    seen = set()
-    for message_id in old_ids:
-        if not message_id or message_id in seen:
-            continue
-        seen.add(message_id)
+
+def premium_delete_previous(chat_id):
+    """အရင် Account ရဲ့ ပုံ + စာ + button message တွေကို ဖျက်ပါ။"""
+    with premium_messages_lock:
+        ids = premium_messages.pop(chat_id, [])
+    for message_id in ids:
         try:
-            bot.delete_message(user_id, message_id)
+            bot.delete_message(chat_id, message_id)
         except Exception:
             pass
 
-    state.pop("display_messages", None)
-    with state_lock:
-        user_state[user_id] = state
 
-
-def _premium_track_messages(user_id, messages):
-    """Remember sent message IDs so the next account view can remove them."""
-    state = get_state(user_id).copy()
-    state["display_messages"] = [
-        getattr(m, "message_id", m) for m in messages if m
-    ]
-    set_state(user_id, state)
-
-
-# Preserve display message IDs when an existing browse handler replaces user state.
-# This is an additive compatibility layer; existing state keys and flows remain intact.
-_original_set_state = set_state
-
-def set_state(user_id, state):
-    new_state = dict(state or {})
-    old_state = get_state(user_id)
-    if "display_messages" not in new_state and old_state.get("display_messages"):
-        new_state["display_messages"] = list(old_state.get("display_messages", []))
-    _original_set_state(user_id, new_state)
-
-
-# Override the existing helper without changing its original definition above.
-def remove_callback_menu(call):
-    try:
-        _premium_delete_previous_display(call.from_user.id, call.message.message_id)
-    except Exception:
-        pass
+def premium_delete_callback_message(call):
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
     except Exception:
         pass
 
 
-# Premium account card. Existing account/database values are read only.
-def format_account(acc):
-    status_map = {
-        "available": "🟢 AVAILABLE",
-        "reserved": "🟡 RESERVED",
-        "sold": "🔴 SOLD",
-        "hidden": "⚫ HIDDEN",
-    }
-    status = status_map.get(acc.get("status"), acc.get("status", ""))
+# Existing UI text ကို မြန်မာလိုပဲထားပြီး Premium spacing / presentation ထပ်တိုးခြင်း။
+def premium_main_menu(user_id):
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🛒 အကောင့်ဝယ်မည် 💎", callback_data="buy_menu"),
+        InlineKeyboardButton("👀 အကောင့်တွေကြည့်မယ် 🚀", callback_data="browse_0"),
+    )
+    markup.add(
+        InlineKeyboardButton("💰 အကောင့်ရောင်းမည် 🔥", callback_data="sell_start"),
+        InlineKeyboardButton("💡 အသုံးဝင်တဲ့ Tips ၅ ခု 📌", callback_data="tips_menu"),
+    )
+    if user_id == ADMIN_ID:
+        markup.add(
+            InlineKeyboardButton("👑 [ADMIN] အကောင့်အသစ်တင်ရန် ➕", callback_data="admin_add"),
+            InlineKeyboardButton("📊 [ADMIN] လက်ကျန်အကောင့်များ 📂", callback_data="admin_list"),
+        )
+    return markup
+
+
+# Handler တွေက main_menu ကို runtime မှာ ခေါ်တဲ့အတွက် ဒီ additive UI ကိုသုံးပါမယ်။
+main_menu = premium_main_menu
+
+
+def premium_buy_menu_keyboard():
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🌈 အကုန်လုံးကြည့်မယ်", callback_data="buy_all_skin"),
+        InlineKeyboardButton("✨ Collector", callback_data="skin_Collector"),
+    )
+    markup.add(
+        InlineKeyboardButton("🔥 Epic", callback_data="skin_Epic"),
+        InlineKeyboardButton("💎 Legend", callback_data="skin_Legend"),
+    )
+    markup.add(
+        InlineKeyboardButton("⌨️ ကိုယ်လိုချင်တဲ့ Skin နာမည် ရိုက်မယ်", callback_data="skin_custom"),
+        InlineKeyboardButton("💰 Budget ရွေးမယ်", callback_data="budget_menu"),
+    )
+    markup.add(InlineKeyboardButton("🔙 ပင်မ Menu သို့ပြန်မည် 🏠", callback_data="home"))
+    return markup
+
+
+buy_menu_keyboard = premium_buy_menu_keyboard
+
+
+def premium_budget_keyboard():
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("💵 50,000", callback_data="budget_50000"),
+        InlineKeyboardButton("💵 100,000", callback_data="budget_100000"),
+    )
+    markup.add(
+        InlineKeyboardButton("💵 200,000", callback_data="budget_200000"),
+        InlineKeyboardButton("💵 300,000", callback_data="budget_300000"),
+    )
+    markup.add(InlineKeyboardButton("⌨️ Budget ကို ကိုယ်တိုင်ရိုက်မယ်", callback_data="budget_custom"))
+    markup.add(InlineKeyboardButton("🔙 Skin Menu", callback_data="buy_menu"))
+    return markup
+
+
+budget_keyboard = premium_budget_keyboard
+
+
+def premium_tips_keyboard():
+    markup = InlineKeyboardMarkup(row_width=1)
+    for i, title in enumerate([
+        "🔐 Account လုံခြုံရေး",
+        "📧 Email / Password",
+        "🛡️ 2-Step Verification",
+        "💳 ငွေပေးချေမှု သတိပြုရန်",
+        "⚠️ Scam မဖြစ်အောင် သတိထားရန်",
+    ], start=1):
+        markup.add(InlineKeyboardButton(title, callback_data=f"tip_{i}"))
+    markup.add(InlineKeyboardButton("🔙 ပင်မ Menu သို့ပြန်မည် 🏠", callback_data="home"))
+    return markup
+
+
+tips_keyboard = premium_tips_keyboard
+
+
+def premium_admin_keyboard():
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("➕ အကောင့်အသစ်တင်ရန်", callback_data="admin_add"),
+        InlineKeyboardButton("📂 လက်ကျန်အကောင့်များကြည့်ရန်", callback_data="admin_list"),
+    )
+    markup.add(
+        InlineKeyboardButton("💸 လျော့စျေးတင်မယ်", callback_data="admin_discount"),
+        InlineKeyboardButton("📊 Analysis", callback_data="admin_analysis"),
+    )
+    markup.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+    return markup
+
+
+admin_keyboard = premium_admin_keyboard
+
+
+def premium_format_account(acc):
     sale = acc.get("sale_price")
-    price = int(sale or acc["price"])
-
-    badges = []
-    if acc.get("is_featured"):
-        badges.append("⭐ FEATURED")
-    if acc.get("is_new"):
-        badges.append("🆕 NEW")
-
+    current_price = int(sale or acc["price"])
     lines = [
-        "╔══════════════════════╗",
-        f"║  🎮 <b>GAMING SHOP</b>",
-        "╠══════════════════════╣",
-        f"║ 🆔 <b>{acc['id']}</b>",
-        f"║ 🎮 <b>{acc['title']}</b>",
-        f"║ 📌 {status}",
-        "╠══════════════════════╣",
-        f"║ 🎨 <b>SKIN</b>",
-        f"║ {short_skins(acc.get('skins', ''), 120)}",
+        "━━━━━━━━━━━━━━━━━━",
+        f"🎮 <b>{acc['title']}</b>",
+        f"🆔 <b>{acc['id']}</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"✨ <b>Skin</b> — {short_skins(acc.get('skins', ''))}",
     ]
-
-    if badges:
-        lines.extend([
-            "╠══════════════════════╣",
-            f"║ {' • '.join(badges)}",
-        ])
-
-    lines.append("╠══════════════════════╣")
     if sale and int(sale) < int(acc["price"]):
-        lines.append(f"║ 💰 <s>{int(acc['price']):,} MMK</s>")
-        lines.append(f"║ 🔥 <b>{price:,} MMK</b>  •  SPECIAL PRICE")
+        lines.append(f"💰 <s>{int(acc['price']):,} MMK</s>  ➜  <b>{current_price:,} MMK</b>")
+        lines.append("💸 <b>လျော့စျေးရရှိနိုင်ပါသည်</b>")
     else:
-        lines.append(f"║ 💰 <b>{price:,} MMK</b>")
-    lines.append("╚══════════════════════╝")
+        lines.append(f"💰 <b>{current_price:,} MMK</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
 
-# Account photos are sent in the exact stored order.
-def send_account_photos(chat_id, acc, include_menu=True):
-    # Remove the previous account's photos/text before showing the next one.
-    _premium_delete_previous_display(chat_id)
+format_account = premium_format_account
 
-    sent_messages = []
+
+def premium_send_account_photos(chat_id, acc, include_menu=True):
+    # Admin တင်ထားတဲ့ photos list ကို sort/reverse/shuffle မလုပ်ပါ။
+    # Database ထဲသိမ်းထားတဲ့အစဉ်အတိုင်း တိုက်ရိုက်ပို့ပါသည်။
+    premium_delete_previous(chat_id)
+
+    sent_ids = []
     photos = list(acc.get("photos", []))[:15]
-
-    # IMPORTANT: do not sort, reverse, shuffle, or otherwise modify photos.
-    # This preserves exactly the order in which Admin uploaded them.
     if photos:
-        for i in range(0, len(photos), 10):
-            chunk = photos[i:i + 10]
+        for start in range(0, len(photos), 10):
+            chunk = photos[start:start + 10]
             try:
-                media_messages = bot.send_media_group(
+                sent = bot.send_media_group(
                     chat_id,
-                    [InputMediaPhoto(photo_file_id) for photo_file_id in chunk]
+                    [InputMediaPhoto(photo_id) for photo_id in chunk]
                 )
-                if media_messages:
-                    sent_messages.extend(media_messages)
+                sent_ids.extend([m.message_id for m in sent])
             except Exception:
                 logging.exception("Could not send account photo group for %s", acc["id"])
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton(
-            "🔍  DETAILS",
-            callback_data=f"detail_{acc['id']}"
-        ),
-        InlineKeyboardButton(
-            "🛒  BUY THIS ACCOUNT",
-            callback_data=f"buy_confirm_{acc['id']}"
-        )
+        InlineKeyboardButton("🔍 ပုံအသေးစိတ် ပြန်ကြည့်မယ် 📸", callback_data=f"detail_{acc['id']}"),
+        InlineKeyboardButton("🛒 ဒီအကောင့် ဝယ်မယ် 💎", callback_data=f"buy_confirm_{acc['id']}"),
     )
     if include_menu:
-        markup.row(
-            InlineKeyboardButton("⬅️ PREVIOUS", callback_data="browse_prev"),
-            InlineKeyboardButton("NEXT ➡️", callback_data="browse_next")
-        )
-        markup.add(
-            InlineKeyboardButton("🏠  MAIN MENU", callback_data="home")
-        )
+        markup.add(InlineKeyboardButton("➡️ နောက်အကောင့်ဆက်ကြည့်ရန် 🚀", callback_data="browse_next"))
+        markup.add(InlineKeyboardButton("🔙 ပင်မ Menu 🏠", callback_data="home"))
 
-    text_message = bot.send_message(
+    msg = bot.send_message(
         chat_id,
-        format_account(acc),
+        "✨ <b>အကောင့်အသေးစိတ်</b>\n\n" + format_account(acc),
         parse_mode="HTML",
-        reply_markup=markup
+        reply_markup=markup,
     )
-    sent_messages.append(text_message)
-    _premium_track_messages(chat_id, sent_messages)
+    sent_ids.append(msg.message_id)
+    premium_track(chat_id, sent_ids)
 
 
-# Premium main menu. Callback data stays exactly the same.
-def main_menu(user_id):
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("🛒  BUY ACCOUNT", callback_data="buy_menu"),
-        InlineKeyboardButton("👀  BROWSE ACCOUNTS", callback_data="browse_0"),
-        InlineKeyboardButton("🔥  DISCOUNT ACCOUNTS", callback_data="discount_list"),
-        InlineKeyboardButton("💰  SELL YOUR ACCOUNT", callback_data="sell_start"),
-        InlineKeyboardButton("💡  PREMIUM TIPS", callback_data="tips_menu"),
-    )
-    if user_id == ADMIN_ID:
-        markup.add(
-            InlineKeyboardButton("👑  ADMIN • ADD ACCOUNT", callback_data="admin_add"),
-            InlineKeyboardButton("📊  ADMIN • INVENTORY", callback_data="admin_list"),
-        )
-    return markup
+send_account_photos = premium_send_account_photos
 
 
-def back_button():
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        InlineKeyboardButton("🏠  BACK TO MAIN MENU", callback_data="home")
-    )
-    return markup
+# Callback ဝင်လာတိုင်း Account viewer မှာ အရင် UI ကို အရင်ဖျက်ပါ။
+# ဒါက မူရင်း handler တွေကို မဖျက်ဘဲ အပေါ်ကနေ ထပ်ကာထားတဲ့ cleanup ဖြစ်ပါတယ်။
+_original_process_new_updates = bot.process_new_updates
 
 
-def buy_menu_keyboard():
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("🌈  ALL ACCOUNTS", callback_data="buy_all_skin"),
-        InlineKeyboardButton("✨  COLLECTOR", callback_data="skin_Collector"),
-        InlineKeyboardButton("🔥  EPIC", callback_data="skin_Epic"),
-        InlineKeyboardButton("💎  LEGEND", callback_data="skin_Legend"),
-        InlineKeyboardButton("⌨️  CUSTOM SKIN", callback_data="skin_custom"),
-        InlineKeyboardButton("💰  CHOOSE BUDGET", callback_data="budget_menu"),
-        InlineKeyboardButton("🏠  MAIN MENU", callback_data="home"),
-    )
-    return markup
+def _premium_process_new_updates(updates):
+    try:
+        for update in updates or []:
+            callback = getattr(update, "callback_query", None)
+            if callback:
+                data = callback.data or ""
+                chat = getattr(callback, "message", None)
+                if chat:
+                    # Account viewer မှ ထွက်ပြီး Menu/Detail/Buy/Next တစ်ခုခုသို့
+                    # သွားတိုင်း အရင် Account ရဲ့ ပုံ + စာ + Button ကို အရင်ဖျက်ပါ။
+                    with premium_messages_lock:
+                        has_previous_account_ui = bool(premium_messages.get(chat.chat.id))
+                    if has_previous_account_ui:
+                        premium_delete_previous(chat.chat.id)
+    except Exception:
+        logging.exception("Premium cleanup middleware failed")
+    return _original_process_new_updates(updates)
 
 
-def budget_keyboard():
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("💵  50,000", callback_data="budget_50000"),
-        InlineKeyboardButton("💵  100,000", callback_data="budget_100000"),
-        InlineKeyboardButton("💵  200,000", callback_data="budget_200000"),
-        InlineKeyboardButton("💵  300,000", callback_data="budget_300000"),
-        InlineKeyboardButton("⌨️  CUSTOM BUDGET", callback_data="budget_custom"),
-        InlineKeyboardButton("🏠  MAIN MENU", callback_data="home"),
-    )
-    return markup
-
-
-def tips_keyboard():
-    markup = InlineKeyboardMarkup(row_width=1)
-    for i, title in enumerate([
-        "🔐  Account Security",
-        "📧  Email / Password",
-        "🛡️  2-Step Verification",
-        "💳  Payment Safety",
-        "⚠️  Scam Protection",
-    ], start=1):
-        markup.add(InlineKeyboardButton(title, callback_data=f"tip_{i}"))
-    markup.add(
-        InlineKeyboardButton("🏠  MAIN MENU", callback_data="home")
-    )
-    return markup
-
-
-def admin_keyboard():
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("➕  ADD ACCOUNT", callback_data="admin_add"),
-        InlineKeyboardButton("📂  INVENTORY", callback_data="admin_list"),
-        InlineKeyboardButton("💸  DISCOUNT", callback_data="admin_discount"),
-        InlineKeyboardButton("📊  ANALYSIS", callback_data="admin_analysis"),
-        InlineKeyboardButton("👤  SELLER ANALYSIS", callback_data="admin_analysis"),
-        InlineKeyboardButton("🏠  MAIN MENU", callback_data="home"),
-    )
-    return markup
+bot.process_new_updates = _premium_process_new_updates
 
 
 # =========================================================
