@@ -154,22 +154,11 @@ def migrate_existing_photos():
 
 
 def start_original_bot():
-    # Reproduce only the original startup actions without changing main.py.
+    # Do NOT touch Telegram webhook here.
+    # main.py already configures the webhook when it is imported.
+    # Re-setting/removing it here causes Telegram 429 Too Many Requests.
     original.init_db()
-
-    # Existing webhook route remains the original route.
-    if original.PUBLIC_URL:
-        try:
-            original.bot.remove_webhook()
-            original.bot.set_webhook(
-                url=f"{original.PUBLIC_URL}/webhook/{original.TELEGRAM_TOKEN}",
-                drop_pending_updates=True,
-            )
-            logging.info("Webhook set: %s/webhook/...", original.PUBLIC_URL)
-        except Exception:
-            logging.exception("Webhook setup failed")
-    else:
-        logging.warning("PUBLIC_URL မရှိပါ။ Render Environment Variable ထည့်ပါ။")
+    logging.info("Using webhook configured by main.py; launcher will not reset it.")
 
     # Migrate old Telegram file_ids in a background thread so startup is not blocked.
     threading.Thread(target=migrate_existing_photos, daemon=True).start()
