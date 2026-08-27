@@ -50,6 +50,28 @@ db_lock = threading.Lock()
 # =========================================================
 # DATABASE
 # =========================================================
+# PERSISTENCE SAFETY ADD-ON (existing code below is intentionally preserved)
+# Telegram photo file_id values are permanent references; the critical part is
+# keeping the SQLite database itself on Render Persistent Disk.
+# If DB_PATH is not explicitly configured, keep the existing /var/data path.
+# A startup check below makes a storage problem visible instead of silently
+# running with an ephemeral database.
+# =========================================================
+
+def verify_persistent_storage():
+    try:
+        ensure_db_dir()
+        test_path = os.path.join(os.path.dirname(DB_PATH) or '.', '.storage_test')
+        with open(test_path, 'a', encoding='utf-8') as f:
+            f.write('ok\n')
+        os.remove(test_path)
+        logging.info('Database storage is writable: %s', DB_PATH)
+    except Exception:
+        logging.exception(
+            'DATABASE STORAGE WARNING: %s is not writable. On Render, mount a Persistent Disk at /var/data or set DB_PATH to a persistent path.',
+            DB_PATH
+        )
+
 
 def ensure_db_dir():
     directory = os.path.dirname(DB_PATH)
@@ -1616,6 +1638,10 @@ def fallback_text(message):
 # STARTUP
 # =========================================================
 
+# Check storage before opening the existing database. This is additive only;
+# all existing flows, tables, account IDs, skins, prices and photo file_ids
+# remain untouched.
+verify_persistent_storage()
 init_db()
 
 if PUBLIC_URL:
