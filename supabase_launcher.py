@@ -1,258 +1,182 @@
-
-Error code: 429
-Description: Too Many Requests: retry after 1
-
-errorက နာရီဝက်ကြာမှ ပြန်စမ်းတာကို မပျောက်သေးဘူး
-
-
-telegram_bot_premium_updated (2)(3) (1).py
-Python
-
-supabase_launcher(2).py
-Python
-
-ကောင်းပြီ 👍 အခုကစပြီး Simple + Premium + မြန် + မရှုပ်တဲ့ Bot UX ကို အခြေခံထားပြီး ဆက်သွားမယ်။
-
-အရေးကြီးဆုံးစည်းကမ်းကတော့ ရှိပြီးသား အလုပ်လုပ်နေတဲ့ flow တွေကို မဖျက်ဘဲ၊ မလိုအပ်တဲ့နေရာကို မထိဘဲ တိုးတက်အောင်ပဲလုပ်မယ် ဆိုတာပဲ။
-
-
-ဟုတ်တယ် စလုပ်ပါ
-
-ဟုတ်ပြီ။ ဒီတစ်ခါ မင်းရဲ့ မူရင်း main.py ကို လုံးဝမပြင်ဘဲ supabase_launcher.py တစ်ဖိုင်တည်းကို ပြန်တည်ဆောက်ထားပါတယ်။ မူရင်းဖိုင်မှာ 2298 ကြောင်း ရှိတာကို စစ်ထားပါတယ်။ 
-
-
-အခု launcher အသစ်က အရင်ပြဿနာကို ၂ ဖက်လုံးက ဖြေရှင်းထားပါတယ်—
-
-ပုံသိမ်းတဲ့အပိုင်း
-Telegram ကလာတဲ့ပုံကို bot-images ထဲ Supabase အမြဲသိမ်းမယ်။ 
-
-
-ပုံပြန်ပြတဲ့အပိုင်း
-Bot က Account ကြည့်တဲ့အချိန် Supabase URL ကို Telegram ဆီတိုက်ရိုက်ပေးမယ့်အစား Supabase ကနေ server-side download ပြန်ယူပြီး Telegram ကို photo အဖြစ် upload ပြန်လုပ်ပေးမယ်။ ဒါကြောင့် Supabase ထဲမှာ ပုံရှိနေသရွေ့ အချိန်ကြာသွားလည်း Bot က ပြန်ပြနိုင်ပါတယ်။
-
-Webhook 429 အတွက်လည်း launcher က remove_webhook() / set_webhook() ကို ထပ်မလုပ်တော့ပါဘူး။ မူရင်း main.py ရဲ့ webhook setup ကိုပဲ အသုံးပြုပါတယ်။
-
-ဖိုင်အသစ်
-📥 supabase_launcher_v2.py
-
-Render မှာ
-GitHub ရဲ့ လက်ရှိ
-
-supabase_launcher.py
-ကို ဒီဖိုင်နဲ့ အစားထိုးပြီး filename ကို supabase_launcher.py အတိုင်းထားပါ။
-
-Start Command က—
-
-python supabase_launcher.py
-အတိုင်းထားပါ။
-
-main.py ကို မထိပါနဲ့။ မူရင်း 2298 ကြောင်းအတိုင်းထားပါ။ 
-
-
-Deploy ပြီးရင် စမ်းသပ်ပုံက—
-
-Admin → အကောင့်တင်မယ် → ပုံတင် → ပုံအကုန်တင်ပြီးပြီ → ဈေးထည့်
-
-ပြီးရင်
-
-Bot → အကောင့်ကြည့်မယ် → အဲဒီ Account ကိုပြန်ကြည့်
-
-လုပ်ပါ။
-
-Render Logs မှာ
-
-SUPABASE_UPLOAD_OK
-နဲ့ account ပြန်ကြည့်တဲ့အချိန်
-
-SUPABASE_DOWNLOAD_OK
-ပေါ်လာရပါမယ်။
-
-အခု main.py ကိုတော့ မပြင်ထားပါဘူး။
-
-
-supabase_launcher_v2.py
-Code
-
-
-အခုမင်းက ဘာကိုပြင်ပေးထားတာလဲ
-
-အခုနောက်ဆုံး ငါလုပ်ပေးထားတာက Bot ရဲ့ မူရင်း main.py flow တွေကို ပြောင်းတာမဟုတ်ဘဲ supabase_launcher.py ကိုပဲ update လုပ်ထားတာပါ။
-
-အဓိကပြင်ထားတာ ၃ ခုရှိတယ်—
-
-1. ပုံသိမ်းတာ
-Admin/Seller က Telegram မှာ ပုံပို့လိုက်တာနဲ့ launcher က Telegram ကနေ ပုံကို download ယူပြီး Supabase bot-images bucket ထဲ upload လုပ်ပေးတယ်။ လက်ရှိ launcher မှာ ဒီ upload logic ရှိပြီးသားပါ။ 
-
-
-2. ပုံပြန်ကြည့်တာ
-အရင်က အဓိကပြဿနာက Supabase ထဲမှာ URL ရှိနေပေမယ့် Bot ရဲ့ account display function က Telegram InputMediaPhoto နဲ့ အဲဒီ reference ကို တိုက်ရိုက်ပြန်သုံးနေတာပါ။ မူရင်း main.py မှာ account ပုံတွေကို acc["photos"] ထဲကနေယူပြီး Telegram ကို ပြန်ပို့တာကို တွေ့ရတယ်။ 
-
-
-အဲဒါကြောင့် launcher အသစ်မှာ Supabase ကနေ ပုံကို server-side ပြန်ယူပြီး Telegram ကို photo အဖြစ် ပြန်ပို့တဲ့ layer ထည့်ထားတာပါ။ ရည်ရွယ်ချက်က Supabase ထဲမှာ ပုံရှိနေသရွေ့ Bot မှာ account ပြန်ကြည့်တဲ့အခါ ပုံပြန်ပေါ်လာအောင်ပါ။
-
-3. Webhook 429
-အရင် supabase_launcher.py က startup တိုင်း remove_webhook() နဲ့ set_webhook() ပြန်လုပ်နေတာကြောင့် 429 Too Many Requests ဖြစ်ခဲ့တယ်။ 
-
-
-နောက် version မှာတော့ launcher က webhook ကို ထပ်မပြောင်းတော့ဘဲ မူရင်း main.py ရဲ့ webhook setup ကိုပဲ အသုံးပြုဖို့လုပ်ထားတယ်။
-
-မပြင်ထားတာ
-main.py 2298 ကြောင်းကို မပြင်ထားပါဘူး။ မူရင်းက photos ကို database ထဲသိမ်းတဲ့ structure နဲ့ account display flow တွေက မူရင်းအတိုင်းပါ။ 
-
-
-တစ်ချက်တော့ အရေးကြီးတယ် — ဒီ version က “ဘာပုံမဆို အမြဲပြန်ရမယ်” လို့ ငါအခုချက်ချင်းအာမမခံနိုင်သေးဘူး။ အကြောင်းက မင်းရဲ့ main.py က account photos field ထဲမှာ ဘယ်အချိန်မှာ Telegram file ID၊ ဘယ်အချိန်မှာ Supabase URL ဝင်နေတယ်ဆိုတာကို ငါတို့ live environment ထဲမှာ မစမ်းရသေးလို့ပါ။
-
-အခု အကောင်းဆုံးက အသစ်တင်ထားတဲ့ account တစ်ခုကို ၁ ပုံတင်ပြီး Browse Account နဲ့ ပြန်ကြည့်တာပါ။ အဲဒီ test နဲ့ launcher အသစ်ရဲ့ save/retrieve နှစ်ဖက်လုံး တကယ်အလုပ်လုပ်မလုပ် ချက်ချင်းသိနိုင်ပါတယ်။
-
-
-Library
-/
-supabase_launcher_v2.py
-
-
-1
-2
-3
-4
-5
-6
-7
-8
-9
-10
-11
-12
-13
-14
-15
-16
-17
-18
-19
-20
-21
-22
-23
-24
-25
-26
-27
-28
-29
-30
-31
-32
-33
-34
-35
-36
-37
-38
-39
-40
-41
-42
-43
-44
-45
-46
-47
-48
-49
-50
-51
-52
-53
-54
-55
-56
-57
-58
-59
-60
-61
-62
-63
-64
-65
-66
-67
-68
-69
-70
-71
-72
-73
 """
-EXTERNAL SUPABASE PHOTO CONNECTOR — V2
---------------------------------------
-The original main.py is NOT modified.
-Keep the original 2298-line bot file exactly as it is.
+EXTERNAL SUPABASE CONNECTOR
+---------------------------
+This file does NOT modify main.py.
+Keep the original 2298-line bot code exactly as it is.
 
 Render Start Command:
     python supabase_launcher.py
 
-Required environment variables:
-    TELEGRAM_TOKEN
-    ADMIN_ID
-    PUBLIC_URL
-    SUPABASE_URL
-    SUPABASE_SECRET_KEY
-
-Supabase bucket:
-    bot-images (public)
+main.py must be the original bot file.
 """
 
-import io
 import os
 import logging
 import threading
 import urllib.parse
-from typing import Any
-
 import requests
-import telebot
-from telebot.types import InputMediaPhoto, InputFile
 
-# Import original bot. Do not edit its source.
+# Import the original bot as a module. Its 2298 lines are not edited.
 import main as original
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "").strip()
-BUCKET = os.getenv("SUPABASE_BUCKET", "bot-images").strip() or "bot-images"
+BUCKET = "bot-images"
 
 if not SUPABASE_URL:
     raise RuntimeError("SUPABASE_URL environment variable မရှိပါ။")
 if not SUPABASE_SECRET_KEY:
     raise RuntimeError("SUPABASE_SECRET_KEY environment variable မရှိပါ။")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+
+def supabase_public_url(path):
+    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{urllib.parse.quote(path, safe='/')}"
 
 
-# ---------------------------------------------------------------------------
-# Supabase helpers
-# ---------------------------------------------------------------------------
-
-def supabase_public_url(path: str) -> str:
-    return (
-        f"{SUPABASE_URL}/storage/v1/object/public/"
-        f"{urllib.parse.quote(BUCKET, safe='')}/{urllib.parse.quote(path, safe='/')}"
-    )
-
-
-def _storage_object_url(path: str) -> str:
-    return (
-        f"{SUPABASE_URL}/storage/v1/object/"
-        f"{urllib.parse.quote(BUCKET, safe='')}/{urllib.parse.quote(path, safe='/')}"
-    )
-
-
-def upload_to_supabase(path: str, data: bytes, content_type: str = "image/jpeg") -> str:
-    url = _storage_object_url(path)
+def upload_to_supabase(path, data, content_type="image/jpeg"):
+    """Upload/overwrite one file in the existing public bot-images bucket."""
+    url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{urllib.parse.quote(path, safe='/')}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
         "apikey": SUPABASE_SECRET_KEY,
         "Content-Type": content_type,
+        "x-upsert": "true",
+        "Cache-Control": "31536000",
+    }
+    r = requests.post(url, headers=headers, data=data, timeout=60)
+    if r.status_code not in (200, 201):
+        # Some Supabase Storage versions prefer PUT for object replacement.
+        r = requests.put(url, headers=headers, data=data, timeout=60)
+    r.raise_for_status()
+    return supabase_public_url(path)
+
+
+def telegram_photo_to_supabase(photo_size, chat_id, message_id):
+    """Download the Telegram photo once, then return a permanent Supabase URL."""
+    file_info = original.bot.get_file(photo_size.file_id)
+    data = original.bot.download_file(file_info.file_path)
+    unique = getattr(photo_size, "file_unique_id", None) or photo_size.file_id
+    path = f"telegram/{chat_id}/{message_id}_{unique}.jpg"
+    return upload_to_supabase(path, data, "image/jpeg")
+
+
+def preprocess_update(update):
+    """Replace incoming photo file_ids with Supabase public URLs before the
+    original 2298-line handlers see the update.
+
+    This means the original receive_photo_message() function stays untouched.
+    """
+    try:
+        message = getattr(update, "message", None)
+        if message and getattr(message, "photo", None):
+            photos = message.photo
+            if photos:
+                # Upload the highest-resolution Telegram photo.
+                public_url = telegram_photo_to_supabase(
+                    photos[-1],
+                    message.chat.id,
+                    message.message_id,
+                )
+                # The original code reads message.photo[-1].file_id.
+                photos[-1].file_id = public_url
+                logging.info("Photo moved to Supabase: %s", public_url)
+    except Exception:
+        # Never break the original bot if storage temporarily fails.
+        # Leave the Telegram file_id untouched so the original flow can continue.
+        logging.exception("Supabase photo upload failed; keeping Telegram file_id")
+    return update
+
+
+# Keep the original process_new_updates implementation available.
+_original_process_new_updates = original.bot.process_new_updates
+
+
+def external_process_new_updates(updates):
+    processed = [preprocess_update(u) for u in updates]
+    return _original_process_new_updates(processed)
+
+
+# The original Flask webhook calls bot.process_new_updates().
+# Replace only this runtime method; main.py itself is NOT edited.
+original.bot.process_new_updates = external_process_new_updates
+
+
+def migrate_existing_photos():
+    """Best-effort migration of existing Telegram file_ids in SQLite.
+
+    Existing account/seller-request records are copied to Supabase and their
+    stored photo values are changed only in the database, not in main.py.
+    Already-migrated http(s) URLs are skipped.
+    """
+    try:
+        original.init_db()
+        tables = ["accounts", "seller_requests"]
+        for table in tables:
+            try:
+                with original.db_lock:
+                    with original.closing(original.db_connect()) as conn:
+                        rows = conn.execute(f"SELECT id, photos FROM {table} WHERE photos IS NOT NULL AND photos != ''").fetchall()
+
+                for row in rows:
+                    old_values = [x for x in (row["photos"] or "").split(",") if x]
+                    if not old_values:
+                        continue
+                    new_values = []
+                    changed = False
+                    for idx, value in enumerate(old_values):
+                        value = value.strip()
+                        if not value or value.startswith("http://") or value.startswith("https://"):
+                            new_values.append(value)
+                            continue
+                        try:
+                            file_info = original.bot.get_file(value)
+                            data = original.bot.download_file(file_info.file_path)
+                            path = f"migrated/{table}/{row['id']}_{idx}.jpg"
+                            new_values.append(upload_to_supabase(path, data, "image/jpeg"))
+                            changed = True
+                        except Exception:
+                            logging.exception("Could not migrate %s id=%s photo=%s", table, row["id"], idx + 1)
+                            # Keep the old Telegram file_id if one item fails.
+                            new_values.append(value)
+
+                    if changed:
+                        with original.db_lock:
+                            with original.closing(original.db_connect()) as conn:
+                                conn.execute(
+                                    f"UPDATE {table} SET photos=? WHERE id=?",
+                                    (",".join(new_values), row["id"]),
+                                )
+                                conn.commit()
+            except Exception:
+                logging.exception("Photo migration failed for table %s", table)
+    except Exception:
+        logging.exception("Existing photo migration failed")
+
+
+def start_original_bot():
+    # Reproduce only the original startup actions without changing main.py.
+    original.init_db()
+
+    # Existing webhook route remains the original route.
+    if original.PUBLIC_URL:
+        try:
+            original.bot.remove_webhook()
+            original.bot.set_webhook(
+                url=f"{original.PUBLIC_URL}/webhook/{original.TELEGRAM_TOKEN}",
+                drop_pending_updates=True,
+            )
+            logging.info("Webhook set: %s/webhook/...", original.PUBLIC_URL)
+        except Exception:
+            logging.exception("Webhook setup failed")
+    else:
+        logging.warning("PUBLIC_URL မရှိပါ။ Render Environment Variable ထည့်ပါ။")
+
+    # Migrate old Telegram file_ids in a background thread so startup is not blocked.
+    threading.Thread(target=migrate_existing_photos, daemon=True).start()
+
+    port = int(os.getenv("PORT", "5000"))
+    original.app.run(host="0.0.0.0", port=port, threaded=True)
+
+
+if __name__ == "__main__":
+    start_original_bot()
