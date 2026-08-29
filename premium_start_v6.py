@@ -1,13 +1,13 @@
 """
-MLBB MARKET - PREMIUM STARTER v4
-
-Separate runner only.
-- main.py remains untouched.
-- supabase_launcher.py remains untouched.
-- premium_features_v5.py is loaded as a separate addon.
+MLBB MARKET - PREMIUM STARTER v6
+---------------------------------
+Separate runner:
+- main.py is NOT modified.
+- supabase_launcher.py is NOT modified on disk.
+- premium_features_v6.py is loaded as a separate addon.
 
 Render Start Command:
-    python premium_start_v5.py
+    python premium_start_v6.py
 """
 
 import importlib.util
@@ -18,8 +18,8 @@ import supabase_launcher
 
 
 def load_module():
-    path = Path(__file__).with_name("premium_features_v5.py")
-    spec = importlib.util.spec_from_file_location("premium_features_v4", path)
+    path = Path(__file__).with_name("premium_features_v6.py")
+    spec = importlib.util.spec_from_file_location("premium_features_v6", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Premium feature module not found: {path}")
     module = importlib.util.module_from_spec(spec)
@@ -30,7 +30,7 @@ def load_module():
 def main():
     premium = load_module()
     premium.install(supabase_launcher.original)
-    logging.info("PREMIUM_FEATURES_V5_READY")
+    logging.info("PREMIUM_FEATURES_V6_READY")
     supabase_launcher.start_original_bot()
 
 
