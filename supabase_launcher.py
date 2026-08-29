@@ -37,9 +37,10 @@ SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "").strip()
 IMAGE_BUCKET = os.getenv("SUPABASE_IMAGE_BUCKET", "bot-images").strip()
 DB_BACKUP_BUCKET = os.getenv("SUPABASE_DB_BUCKET", "bot-db-backups").strip()
 DB_BACKUP_PATH = os.getenv("SUPABASE_DB_BACKUP_PATH", "shop.db").strip()
-BACKUP_INTERVAL = max(5, int(os.getenv("SUPABASE_BACKUP_INTERVAL", "10")))
-BACKUP_DELAY = max(2, int(os.getenv("SUPABASE_BACKUP_DELAY", "4")))
+BACKUP_INTERVAL = max(5, int(os.getenv("SUPABASE_BACKUP_INTERVAL", "5")))
+BACKUP_DELAY = max(2, int(os.getenv("SUPABASE_BACKUP_DELAY", "2")))
 WEBHOOK_RETRIES = max(1, int(os.getenv("SUPABASE_WEBHOOK_RETRIES", "5")))
+BACKUP_BURST_SECONDS = max(10, int(os.getenv("SUPABASE_BACKUP_BURST_SECONDS", "60")))
 
 if not SUPABASE_URL:
     raise RuntimeError("SUPABASE_URL environment variable မရှိပါ။")
@@ -434,18 +435,30 @@ _original_process_new_updates = original.bot.process_new_updates
 
 
 def _delayed_backup():
-    try:
-        backup_local_db(force=False)
-    except Exception:
-        logging.exception("Delayed DB backup failed")
+    """Backup repeatedly for a short burst because TeleBot handler work is threaded."""
+    deadline = time.time() + BACKUP_BURST_SECONDS
+    last_sig = None
+    while time.time() < deadline:
+        try:
+            db_path = original.DB_PATH
+            if os.path.exists(db_path):
+                stat = os.stat(db_path)
+                sig = (stat.st_size, stat.st_mtime_ns)
+                if sig != last_sig:
+                    last_sig = sig
+                    backup_local_db(force=False)
+        except Exception:
+            logging.exception("Delayed DB backup failed")
+        time.sleep(BACKUP_DELAY)
 
 
 def external_process_new_updates(updates):
     processed = [preprocess_update(u) for u in updates]
     result = _original_process_new_updates(processed)
-    # TeleBot may dispatch handlers in worker threads, so wait a little before backing up.
-    timer = threading.Timer(BACKUP_DELAY, _delayed_backup)
-    timer.daemon = True
+    # TeleBot may dispatch handlers in worker threads. Keep checking the DB
+    # for up to BACKUP_BURST_SECONDS so Account/price/discount changes get persisted
+    # after their handler actually commits.
+    timer = threading.Thread(target=_delayed_backup, daemon=True)
     timer.start()
     return result
 
@@ -458,23 +471,40 @@ original.bot.process_new_updates = external_process_new_updates
 # ---------------------------------------------------------------------------
 _monitor_stop = threading.Event()
 _previous_accounts = account_count(original.DB_PATH)
+_previous_db_signature = None
+if os.path.exists(original.DB_PATH):
+    try:
+        _st = os.stat(original.DB_PATH)
+        _previous_db_signature = (_st.st_size, _st.st_mtime_ns)
+    except OSError:
+        _previous_db_signature = None
 
 
 def persistence_monitor():
-    global _previous_accounts
+    """Persist DB whenever its file changes, not only when account count changes."""
+    global _previous_accounts, _previous_db_signature
     while not _monitor_stop.wait(BACKUP_INTERVAL):
         try:
-            current = account_count(original.DB_PATH)
+            db_path = original.DB_PATH
+            current = account_count(db_path)
+            changed = False
 
-            # If current DB suddenly becomes empty from a non-empty runtime DB,
-            # that is most likely a real admin deletion. Persist it so deleted
-            # accounts stay deleted after restart.
+            if os.path.exists(db_path):
+                st = os.stat(db_path)
+                signature = (st.st_size, st.st_mtime_ns)
+                changed = signature != _previous_db_signature
+            else:
+                signature = None
+
+            # Real admin deletions from a populated DB to zero accounts should
+            # also be persisted; otherwise an old remote copy would resurrect them.
             intentional_empty = _previous_accounts > 0 and current == 0
 
-            if current > 0 or intentional_empty:
+            if changed or current > 0 or intentional_empty:
                 backup_local_db(force=intentional_empty)
 
             _previous_accounts = current
+            _previous_db_signature = signature
         except Exception:
             logging.exception("Persistence monitor failed")
 
@@ -536,6 +566,7 @@ def start_original_bot():
 
     # main.py has already initialized the local schema during import.
     original.init_db()
+    logging.info("LOCAL_DB path=%s accounts=%s exists=%s", original.DB_PATH, account_count(original.DB_PATH), os.path.exists(original.DB_PATH))
 
     # Restore persistent DB BEFORE serving requests, when local DB is empty.
     restored = restore_remote_db_if_needed()
