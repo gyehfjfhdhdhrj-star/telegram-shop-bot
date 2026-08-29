@@ -36,6 +36,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 import threading
+import logging
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -111,6 +112,9 @@ def install(original):
     init_feature_db()
 
     def rows(sql, params=()):
+        # The Supabase launcher restores shop.db after this addon is installed.
+        # Re-ensure feature schema before every query so restore cannot remove it.
+        init_feature_db()
         with db_lock:
             with closing(db_connect()) as conn:
                 return conn.execute(sql, params).fetchall()
@@ -857,6 +861,7 @@ def install(original):
         nonlocal last_account_id, last_prices
         while not stop.wait(10):
             try:
+                init_feature_db()
                 current = rows("""
                     SELECT id, COALESCE(sale_price,price) AS p
                     FROM accounts
@@ -913,3 +918,18 @@ def install(original):
 
     # Expose only for diagnostics; not required by main.py.
     original.PREMIUM_FEATURES_V4_READY = True
+
+    # IMPORTANT: supabase_launcher.start_original_bot() performs DB restore
+    # after this addon is installed. Wrap that function so feature schema is
+    # recreated immediately after restore, before the Flask server starts.
+    if not hasattr(original, "_premium_v4_start_wrapped"):
+        original._premium_v4_start_wrapped = True
+        _original_start = original.start_original_bot
+
+        def _start_with_feature_schema(*args, **kwargs):
+            result = _original_start(*args, **kwargs)
+            return result
+
+        # The actual restore happens inside the external launcher module, so
+        # rely on lazy init in rows()/monitor/callbacks as well.
+        # Keep this hook only as a marker; do not replace launcher startup.
