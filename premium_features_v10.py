@@ -77,9 +77,6 @@ def _install_reply_keyboard_layer(original):
     """
     bot = original.bot
 
-    # Install bottom Reply Keyboard + normal inline menu split.
-    _install_reply_keyboard_layer(original)
-
     # The original Flask webhook eventually calls bot.process_new_updates().
     previous = bot.process_new_updates
     if hasattr(bot, "_reply_keyboard_v1_previous_process"):
@@ -236,6 +233,10 @@ def install(original):
 
     bot = original.bot
     ADMIN_ID = int(original.ADMIN_ID)
+
+    # IMPORTANT: install the bottom Reply Keyboard interceptor now.
+    # This must happen before start_original_bot() begins serving updates.
+    _install_reply_keyboard_layer(original)
     db_lock = original.db_lock
     db_connect = original.db_connect
     closing = original.closing
@@ -655,7 +656,7 @@ def install(original):
     def handle_callback(call):
         data = call.data or ""
         if data == "home":
-            # Preserve original home behavior, then show the compact bottom keyboard.
+            # Let original home handler run, then explicitly keep the bottom keyboard visible.
             return False
         if data == "premium_more":
             bot.answer_callback_query(call.id)
