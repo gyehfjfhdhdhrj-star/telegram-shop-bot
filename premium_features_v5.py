@@ -850,6 +850,28 @@ def install(original):
         bot.process_new_updates = intercepted_process
 
     # ------------------------------------------------------------
+    # Ensure feature schema survives the Supabase restore performed by
+    # supabase_launcher.start_original_bot(). The launcher calls main.init_db()
+    # after restoring shop.db, so patch main.init_db at runtime (source file
+    # remains untouched) and recreate ONLY our feature schema there.
+    # ------------------------------------------------------------
+    if not hasattr(original, "_premium_v6_original_init_db"):
+        original._premium_v6_original_init_db = original.init_db
+        _schema_lock = threading.RLock()
+
+        def _init_db_with_premium_schema(*args, **kwargs):
+            result = original._premium_v6_original_init_db(*args, **kwargs)
+            with _schema_lock:
+                init_feature_db()
+            return result
+
+        original.init_db = _init_db_with_premium_schema
+
+    # Run once now and also on every later main.init_db() call, including the
+    # init_db() call made by the launcher immediately after remote restore.
+    init_feature_db()
+
+    # ------------------------------------------------------------
     # Background notifications, kept independent and non-fatal.
     # ------------------------------------------------------------
     stop = threading.Event()
@@ -918,18 +940,3 @@ def install(original):
 
     # Expose only for diagnostics; not required by main.py.
     original.PREMIUM_FEATURES_V4_READY = True
-
-    # IMPORTANT: supabase_launcher.start_original_bot() performs DB restore
-    # after this addon is installed. Wrap that function so feature schema is
-    # recreated immediately after restore, before the Flask server starts.
-    if not hasattr(original, "_premium_v4_start_wrapped"):
-        original._premium_v4_start_wrapped = True
-        _original_start = original.start_original_bot
-
-        def _start_with_feature_schema(*args, **kwargs):
-            result = _original_start(*args, **kwargs)
-            return result
-
-        # The actual restore happens inside the external launcher module, so
-        # rely on lazy init in rows()/monitor/callbacks as well.
-        # Keep this hook only as a marker; do not replace launcher startup.
