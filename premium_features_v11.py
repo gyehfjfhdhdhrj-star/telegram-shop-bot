@@ -51,6 +51,7 @@ def _reply_keyboard_markup(user_id, admin=False):
         KeyboardButton("🛒 အကောင့်ဝယ်မယ်"),
         KeyboardButton("👀 အကောင့်ကြည့်မယ်"),
         KeyboardButton("💰 အကောင့်ရောင်းမယ်"),
+        KeyboardButton("💸 လျော့စျေးအကောင့်များ"),
     )
     # Keep admin-only controls out of the general reply keyboard.
     return kb
@@ -59,11 +60,13 @@ def _reply_keyboard_markup(user_id, admin=False):
 def _inline_compact_main_menu(user_id, original):
     """The other half stays in the normal inline menu area."""
     m = InlineKeyboardMarkup(row_width=2)
+    # Inline area contains feature menus only; keyboard items are NOT duplicated here.
     m.add(
-        InlineKeyboardButton("💸 လျော့စျေးအကောင့်များ", callback_data="discount_menu"),
-        InlineKeyboardButton("👤 ကျွန်ုပ်၏အကောင့်", callback_data="my_account"),
-        InlineKeyboardButton("✨ အခြား Features", callback_data="premium_more"),
-        InlineKeyboardButton("💡 Tips", callback_data="tips_menu"),
+        InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
+        InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
+        InlineKeyboardButton("🔎 အဆင့်မြင့်ရှာဖွေမယ်", callback_data="premium_advanced_search"),
+        InlineKeyboardButton("🛡️ RC လုံးဝစိတ်ချရဆုံးအကောင့်များ", callback_data="premium_verified"),
+        InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
     )
     if int(user_id) == int(original.ADMIN_ID):
         m.add(InlineKeyboardButton("👑 ADMIN PANEL", callback_data="admin_home"))
@@ -185,9 +188,7 @@ def _install_reply_keyboard_layer(original):
 
                     bot.send_message(
                         message.chat.id,
-                        "👋 မင်္ဂလာပါ 🎮 <b>MLBB MARKET</b> မှ ကြိုဆိုပါတယ်။\n\n"
-                        "အောက်က Menu ကနေ လိုချင်တာကို ရွေးနိုင်ပါတယ်။",
-                        parse_mode="HTML",
+                        "⌨️",
                         reply_markup=_reply_keyboard_markup(
                             message.from_user.id,
                             message.from_user.id == original.ADMIN_ID,
@@ -195,7 +196,7 @@ def _install_reply_keyboard_layer(original):
                     )
                     bot.send_message(
                         message.chat.id,
-                        "✨ <b>အဓိက Menu</b>",
+                        "✨ <b>Features</b>",
                         parse_mode="HTML",
                         reply_markup=_inline_compact_main_menu(
                             message.from_user.id, original
@@ -213,6 +214,26 @@ def _install_reply_keyboard_layer(original):
 
                 if txt == "💰 အကောင့်ရောင်းမယ်":
                     _direct_sell(message)
+                    continue
+
+                if txt == "💸 လျော့စျေးအကောင့်များ":
+                    # Hand the same original discount menu callback a proper update.
+                    try:
+                        from types import SimpleNamespace
+                        # Use a lightweight direct flow: invoke the original callback is unsafe,
+                        # so let the original handler process a synthetic callback is avoided.
+                        # Instead present the existing discount action through a small inline menu.
+                        bot.send_message(
+                            message.chat.id,
+                            "💸 <b>လျော့စျေးအကောင့်များ</b>",
+                            parse_mode="HTML",
+                            reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals")],
+                                [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")],
+                            ]),
+                        )
+                    except Exception:
+                        logging.exception("Discount reply keyboard failed")
                     continue
 
             remaining.append(update)
@@ -499,7 +520,7 @@ def install(original):
             KeyboardButton("🛒 အကောင့်ဝယ်မယ်"),
             KeyboardButton("👀 အကောင့်ကြည့်မယ်"),
         )
-        m.row(KeyboardButton("💰 အကောင့်ရောင်းမယ်"))
+        m.row(KeyboardButton("💰 အကောင့်ရောင်းမယ်"), KeyboardButton("💸 လျော့စျေးအကောင့်များ"))
         return m
 
     def show_quick_reply(chat_id):
@@ -584,30 +605,49 @@ def install(original):
             return
 
         photos = [p for p in (acc.get("photos") or []) if p][:15]
-        text = f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n{format_account_wrapped(acc)}"
+        caption = f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n{format_account_wrapped(acc)}"
 
-        # Group photos together when Telegram accepts the references.
-        # The text card is sent separately so it can never disappear when a
-        # media-group/photo request fails.
+        # Put the full account information into the first photo caption so
+        # the account + info arrive together as one Telegram media reply.
+        sent_media = False
         if photos:
             try:
                 from telebot.types import InputMediaPhoto
-                media = [InputMediaPhoto(p) for p in photos]
-                bot.send_media_group(chat_id, media)
+                if len(photos) == 1:
+                    bot.send_photo(chat_id, photos[0], caption=caption, parse_mode="HTML")
+                else:
+                    media = [InputMediaPhoto(photos[0], caption=caption, parse_mode="HTML")]
+                    media.extend(InputMediaPhoto(p) for p in photos[1:])
+                    bot.send_media_group(chat_id, media)
+                sent_media = True
             except Exception:
-                logging.exception("Premium media-group send failed for %s; falling back to individual photos", acc.get("id"))
-                for photo in photos:
-                    try:
-                        bot.send_photo(chat_id, photo)
-                    except Exception:
-                        logging.exception("Premium photo send failed for %s", acc.get("id"))
+                logging.exception("Account media+caption send failed for %s", acc.get("id"))
 
-        bot.send_message(
-            chat_id,
-            text,
-            parse_mode="HTML",
-            reply_markup=account_nav_markup(kind, acc),
+        if not sent_media:
+            bot.send_message(chat_id, caption, parse_mode="HTML")
+
+        # Telegram media groups cannot carry inline keyboards, so actions are
+        # a tiny follow-up control row only; no extra informational text.
+        m = InlineKeyboardMarkup(row_width=2)
+        prev_next = {
+            "browse": ("browse_prev", "browse_next"),
+            "search": ("premium_search_prev", "premium_search_next"),
+            "favorites": ("premium_fav_prev", "premium_fav_next"),
+            "new": ("premium_new_prev", "premium_new_next"),
+            "verified": ("premium_ver_prev", "premium_ver_next"),
+        }
+        prev_cb, next_cb = prev_next.get(kind, ("browse_prev", "browse_next"))
+        m.row(
+            InlineKeyboardButton("⬅️ အရင်", callback_data=prev_cb),
+            InlineKeyboardButton("နောက် ➡️", callback_data=next_cb),
         )
+        m.row(
+            InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
+            InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
+        )
+        m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးပါ", callback_data=f"premium_price_alert_{acc['db_id']}"))
+        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+        bot.send_message(chat_id, "👇", reply_markup=m)
 
     # ------------------------------------------------------------
     # State helpers
