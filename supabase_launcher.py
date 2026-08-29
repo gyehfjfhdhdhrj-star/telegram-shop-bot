@@ -1,27 +1,43 @@
 """
-EXTERNAL SUPABASE CONNECTOR
----------------------------
-This file does NOT modify main.py.
-Keep the original 2298-line bot code exactly as it is.
+EXTERNAL SUPABASE CONNECTOR - STORAGE SAFE DISPLAY VERSION
+===========================================================
 
-Render Start Command:
-    python supabase_launcher.py
+IMPORTANT:
+- This file does NOT edit main.py.
+- Keep the original main.py exactly as supplied by the user.
+- Render Start Command:
+      python supabase_launcher.py
 
-main.py must be the original bot file.
+What this launcher does externally:
+1. Uploads incoming Telegram photos to Supabase Storage bucket `bot-images`.
+2. Stores the resulting permanent Supabase public URL in the ORIGINAL bot state/DB
+   by replacing only the incoming photo file_id at runtime. main.py source is untouched.
+3. When the ORIGINAL bot later tries to send a Supabase URL back to Telegram,
+   this launcher downloads the object and sends it to Telegram as a real uploaded
+   photo/file. This avoids relying on Telegram fetching the Supabase URL itself.
+4. Migrates old Telegram file_ids already stored in SQLite to Supabase.
+5. DOES NOT call remove_webhook()/set_webhook(); main.py keeps responsibility for
+   the webhook setup, preventing the previous 429 webhook loop.
 """
 
-import os
+import copy
+import io
 import logging
+import os
 import threading
+import time
 import urllib.parse
+
 import requests
 
-# Import the original bot as a module. Its 2298 lines are not edited.
+# Keep the original bot source completely untouched.
 import main as original
+
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "").strip()
-BUCKET = "bot-images"
+BUCKET = os.getenv("SUPABASE_BUCKET", "bot-images").strip() or "bot-images"
+REQUEST_TIMEOUT = int(os.getenv("SUPABASE_REQUEST_TIMEOUT", "60"))
 
 if not SUPABASE_URL:
     raise RuntimeError("SUPABASE_URL environment variable မရှိပါ။")
@@ -29,114 +45,241 @@ if not SUPABASE_SECRET_KEY:
     raise RuntimeError("SUPABASE_SECRET_KEY environment variable မရှိပါ။")
 
 
-def supabase_public_url(path):
-    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{urllib.parse.quote(path, safe='/')}"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
 
-def upload_to_supabase(path, data, content_type="image/jpeg"):
-    """Upload/overwrite one file in the existing public bot-images bucket."""
-    url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{urllib.parse.quote(path, safe='/')}"
+# ---------------------------------------------------------------------------
+# SUPABASE STORAGE HELPERS
+# ---------------------------------------------------------------------------
+
+def supabase_public_url(path: str) -> str:
+    return (
+        f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/"
+        f"{urllib.parse.quote(path, safe='/')}"
+    )
+
+
+def is_supabase_url(value) -> bool:
+    return isinstance(value, str) and value.startswith(
+        f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/"
+    )
+
+
+def upload_to_supabase(path: str, data: bytes, content_type: str = "image/jpeg") -> str:
+    """Upload one object to the existing public bucket, with PUT fallback."""
+    encoded_path = urllib.parse.quote(path, safe="/")
+    url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{encoded_path}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
         "apikey": SUPABASE_SECRET_KEY,
         "Content-Type": content_type,
-        "x-upsert": "true",
         "Cache-Control": "31536000",
+        "x-upsert": "true",
     }
-    r = requests.post(url, headers=headers, data=data, timeout=60)
-    if r.status_code not in (200, 201):
-        # Some Supabase Storage versions prefer PUT for object replacement.
-        r = requests.put(url, headers=headers, data=data, timeout=60)
-    r.raise_for_status()
-    return supabase_public_url(path)
+
+    last_error = None
+    for method in ("post", "put"):
+        try:
+            response = requests.request(
+                method,
+                url,
+                headers=headers,
+                data=data,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if response.status_code in (200, 201, 204):
+                return supabase_public_url(path)
+            last_error = RuntimeError(
+                f"Supabase {method.upper()} upload failed: "
+                f"HTTP {response.status_code} {response.text[:300]}"
+            )
+        except Exception as exc:
+            last_error = exc
+
+    raise last_error or RuntimeError("Unknown Supabase upload error")
 
 
-def telegram_photo_to_supabase(photo_size, chat_id, message_id):
-    """Download the Telegram photo once, then return a permanent Supabase URL."""
+def download_supabase_object(value: str) -> bytes:
+    """Download a public Supabase Storage object as bytes for Telegram upload."""
+    response = requests.get(value, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.content
+
+
+def telegram_photo_to_supabase(photo_size, chat_id, message_id) -> str:
+    """Download a Telegram photo and store it permanently in Supabase."""
     file_info = original.bot.get_file(photo_size.file_id)
     data = original.bot.download_file(file_info.file_path)
     unique = getattr(photo_size, "file_unique_id", None) or photo_size.file_id
     path = f"telegram/{chat_id}/{message_id}_{unique}.jpg"
-    return upload_to_supabase(path, data, "image/jpeg")
+    public_url = upload_to_supabase(path, data, "image/jpeg")
+    logging.info("SUPABASE_UPLOAD_OK path=%s", path)
+    return public_url
 
+
+# ---------------------------------------------------------------------------
+# INCOMING PHOTO INTERCEPTOR
+# ---------------------------------------------------------------------------
 
 def preprocess_update(update):
-    """Replace incoming photo file_ids with Supabase public URLs before the
-    original 2298-line handlers see the update.
+    """
+    Upload incoming photos before original handlers process them.
 
-    This means the original receive_photo_message() function stays untouched.
+    Telegram sends an album as separate photo messages. Each message is handled
+    independently and keeps its own original message_id/file_unique_id, so the
+    original photo order is preserved.
     """
     try:
         message = getattr(update, "message", None)
-        if message and getattr(message, "photo", None):
-            photos = message.photo
-            if photos:
-                # Upload the highest-resolution Telegram photo.
+        photos = getattr(message, "photo", None) if message else None
+        if message and photos:
+            source = photos[-1]
+            if not is_supabase_url(getattr(source, "file_id", None)):
                 public_url = telegram_photo_to_supabase(
-                    photos[-1],
+                    source,
                     message.chat.id,
                     message.message_id,
                 )
-                # The original code reads message.photo[-1].file_id.
-                photos[-1].file_id = public_url
-                logging.info("Photo moved to Supabase: %s", public_url)
+                # IMPORTANT: this is an in-memory runtime change only.
+                # main.py on disk is not modified.
+                source.file_id = public_url
+                logging.info(
+                    "PHOTO_REFERENCE_REPLACED chat=%s message=%s",
+                    message.chat.id,
+                    message.message_id,
+                )
     except Exception:
-        # Never break the original bot if storage temporarily fails.
-        # Leave the Telegram file_id untouched so the original flow can continue.
-        logging.exception("Supabase photo upload failed; keeping Telegram file_id")
+        # Storage failure must never kill the original bot flow.
+        logging.exception("SUPABASE_INCOMING_UPLOAD_FAILED; keeping Telegram file_id")
     return update
 
 
-# Keep the original process_new_updates implementation available.
+# ---------------------------------------------------------------------------
+# OUTGOING PHOTO INTERCEPTOR
+# ---------------------------------------------------------------------------
+# Save original methods before monkey-patching them.
 _original_process_new_updates = original.bot.process_new_updates
+_original_send_photo = original.bot.send_photo
+_original_send_media_group = original.bot.send_media_group
 
 
+def _media_value(media):
+    return getattr(media, "media", media)
+
+
+def _supabase_bytesio(url: str) -> io.BytesIO:
+    data = download_supabase_object(url)
+    stream = io.BytesIO(data)
+    stream.name = "image.jpg"
+    stream.seek(0)
+    return stream
+
+
+def _prepare_media_item(item):
+    """Return a copy of InputMediaPhoto with Supabase URL replaced by a file object."""
+    value = _media_value(item)
+    if not is_supabase_url(value):
+        return item
+
+    prepared = copy.copy(item)
+    stream = _supabase_bytesio(value)
+    prepared.media = stream
+    return prepared
+
+
+def external_send_photo(chat_id, photo, *args, **kwargs):
+    """
+    If the original bot tries to send a Supabase public URL, download it and
+    upload the bytes to Telegram. Normal Telegram file_ids/URLs are unchanged.
+    """
+    try:
+        if is_supabase_url(photo):
+            logging.info("SUPABASE_DOWNLOAD_FOR_TELEGRAM_OK url=%s", photo)
+            stream = _supabase_bytesio(photo)
+            return _original_send_photo(chat_id, stream, *args, **kwargs)
+    except Exception:
+        logging.exception("SUPABASE_SEND_PHOTO_FAILED; trying original photo value")
+    return _original_send_photo(chat_id, photo, *args, **kwargs)
+
+
+def external_send_media_group(chat_id, media, *args, **kwargs):
+    """Convert Supabase URLs inside InputMediaPhoto items into file uploads."""
+    try:
+        prepared_media = [_prepare_media_item(item) for item in media]
+        return _original_send_media_group(chat_id, prepared_media, *args, **kwargs)
+    except Exception:
+        logging.exception("SUPABASE_SEND_MEDIA_GROUP_FAILED; trying original media")
+        return _original_send_media_group(chat_id, media, *args, **kwargs)
+
+
+# The original Flask webhook calls this method internally.
 def external_process_new_updates(updates):
     processed = [preprocess_update(u) for u in updates]
     return _original_process_new_updates(processed)
 
 
-# The original Flask webhook calls bot.process_new_updates().
-# Replace only this runtime method; main.py itself is NOT edited.
+# Runtime-only monkey patches. main.py source remains unchanged.
 original.bot.process_new_updates = external_process_new_updates
+original.bot.send_photo = external_send_photo
+original.bot.send_media_group = external_send_media_group
 
+
+# ---------------------------------------------------------------------------
+# EXISTING PHOTO MIGRATION
+# ---------------------------------------------------------------------------
 
 def migrate_existing_photos():
-    """Best-effort migration of existing Telegram file_ids in SQLite.
+    """Move existing Telegram file_ids in accounts/seller_requests to Supabase."""
+    logging.info("PHOTO_MIGRATION_START")
+    migrated = 0
+    failed = 0
 
-    Existing account/seller-request records are copied to Supabase and their
-    stored photo values are changed only in the database, not in main.py.
-    Already-migrated http(s) URLs are skipped.
-    """
     try:
         original.init_db()
-        tables = ["accounts", "seller_requests"]
-        for table in tables:
+
+        for table in ("accounts", "seller_requests"):
             try:
                 with original.db_lock:
                     with original.closing(original.db_connect()) as conn:
-                        rows = conn.execute(f"SELECT id, photos FROM {table} WHERE photos IS NOT NULL AND photos != ''").fetchall()
+                        rows = conn.execute(
+                            f"SELECT id, photos FROM {table} "
+                            "WHERE photos IS NOT NULL AND photos != ''"
+                        ).fetchall()
 
                 for row in rows:
-                    old_values = [x for x in (row["photos"] or "").split(",") if x]
+                    old_values = [x.strip() for x in (row["photos"] or "").split(",") if x.strip()]
                     if not old_values:
                         continue
+
                     new_values = []
                     changed = False
-                    for idx, value in enumerate(old_values):
-                        value = value.strip()
-                        if not value or value.startswith("http://") or value.startswith("https://"):
+
+                    for index, value in enumerate(old_values):
+                        # Already permanent: keep exactly as stored.
+                        if value.startswith("http://") or value.startswith("https://"):
                             new_values.append(value)
                             continue
+
                         try:
                             file_info = original.bot.get_file(value)
                             data = original.bot.download_file(file_info.file_path)
-                            path = f"migrated/{table}/{row['id']}_{idx}.jpg"
-                            new_values.append(upload_to_supabase(path, data, "image/jpeg"))
+                            path = f"migrated/{table}/{row['id']}/{index + 1}.jpg"
+                            new_url = upload_to_supabase(path, data, "image/jpeg")
+                            new_values.append(new_url)
                             changed = True
+                            migrated += 1
                         except Exception:
-                            logging.exception("Could not migrate %s id=%s photo=%s", table, row["id"], idx + 1)
-                            # Keep the old Telegram file_id if one item fails.
+                            failed += 1
+                            logging.exception(
+                                "PHOTO_MIGRATION_ITEM_FAILED table=%s id=%s index=%s",
+                                table,
+                                row["id"],
+                                index + 1,
+                            )
+                            # Keep original value if migration fails.
                             new_values.append(value)
 
                     if changed:
@@ -147,23 +290,40 @@ def migrate_existing_photos():
                                     (",".join(new_values), row["id"]),
                                 )
                                 conn.commit()
-            except Exception:
-                logging.exception("Photo migration failed for table %s", table)
-    except Exception:
-        logging.exception("Existing photo migration failed")
 
+            except Exception:
+                failed += 1
+                logging.exception("PHOTO_MIGRATION_TABLE_FAILED table=%s", table)
+
+    except Exception:
+        logging.exception("PHOTO_MIGRATION_FAILED")
+
+    logging.info("PHOTO_MIGRATION_DONE migrated=%s failed=%s", migrated, failed)
+
+
+# ---------------------------------------------------------------------------
+# STARTUP
+# ---------------------------------------------------------------------------
 
 def start_original_bot():
-    # Do NOT touch Telegram webhook here.
-    # main.py already configures the webhook when it is imported.
-    # Re-setting/removing it here causes Telegram 429 Too Many Requests.
-    original.init_db()
-    logging.info("Using webhook configured by main.py; launcher will not reset it.")
+    """
+    Start the original Flask app without touching its webhook configuration.
 
-    # Migrate old Telegram file_ids in a background thread so startup is not blocked.
-    threading.Thread(target=migrate_existing_photos, daemon=True).start()
+    main.py already performs its original init_db() and webhook setup at import
+    time. We deliberately do NOT call remove_webhook()/set_webhook() here.
+    """
+    try:
+        # Give the original module a chance to finish its startup setup first.
+        original.init_db()
+    except Exception:
+        logging.exception("Original init_db() failed")
+
+    # Run migration in the background. This never blocks the web server.
+    threading.Thread(target=migrate_existing_photos, daemon=True, name="supabase-photo-migration").start()
 
     port = int(os.getenv("PORT", "5000"))
+    logging.info("SUPABASE_CONNECTOR_READY bucket=%s", BUCKET)
+    logging.info("STARTING_ORIGINAL_FLASK port=%s", port)
     original.app.run(host="0.0.0.0", port=port, threaded=True)
 
 
