@@ -112,9 +112,6 @@ def install(original):
     init_feature_db()
 
     def rows(sql, params=()):
-        # The Supabase launcher restores shop.db after this addon is installed.
-        # Re-ensure feature schema before every query so restore cannot remove it.
-        init_feature_db()
         with db_lock:
             with closing(db_connect()) as conn:
                 return conn.execute(sql, params).fetchall()
@@ -338,8 +335,7 @@ def install(original):
             InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
             InlineKeyboardButton("🔎 အဆင့်မြင့်ရှာဖွေမယ်", callback_data="premium_advanced_search"),
             InlineKeyboardButton("✅ စစ်ဆေးပြီးအကောင့်များ", callback_data="premium_verified"),
-            InlineKeyboardButton("🔔 အသစ်တင်အသိပေးချက်", callback_data="premium_new_alert"),
-            InlineKeyboardButton("🔥 Flash Deal များ", callback_data="premium_flash_deals"),
+            InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
             InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"),
         )
         return m
@@ -592,26 +588,56 @@ def install(original):
             navigate(call, -1 if data.endswith("prev") else 1)
             return True
 
-        if data == "premium_flash_deals":
+        if data == "premium_special_deals":
             bot.answer_callback_query(call.id)
             items = []
             for r in rows("SELECT account_id, deal_price, ends_at FROM premium_flash_deals ORDER BY ends_at ASC"):
-                acc = account_by_number(int(r["account_id"]))
-                deal = active_flash(int(r["account_id"]))
+                aid = int(r["account_id"])
+                acc = account_by_number(aid)
+                deal = active_flash(aid)
                 if acc and deal and acc.get("status") == "available":
-                    items.append((acc, deal[0], deal[1]))
+                    original_price = int(acc.get("price") or 0)
+                    items.append((acc, int(deal[0]), deal[1], original_price))
+
             if not items:
-                bot.send_message(call.message.chat.id, "🔥 လက်ရှိ Flash Deal မရှိသေးပါ။", reply_markup=buyer_features_menu())
+                bot.send_message(
+                    call.message.chat.id,
+                    "🔥 လောလောဆယ် <b>အထူးစပရှယ် လျော့စျေးအကောင့်</b> မရှိသေးပါ။",
+                    parse_mode="HTML",
+                    reply_markup=buyer_features_menu(),
+                )
                 return True
-            m = InlineKeyboardMarkup(row_width=1)
-            lines = ["🔥 <b>FLASH DEAL အကောင့်များ</b>\n"]
-            for acc, price, ends in items:
+
+            for acc, deal_price, ends, original_price in items:
                 remain = max(0, int((ends - datetime.now(timezone.utc)).total_seconds()))
                 mins, secs = divmod(remain, 60)
-                lines.append(f"🆔 <b>{acc['id']}</b> — 🔥 <b>{price:,} MMK</b> — ⏰ {mins:02d}:{secs:02d}")
-                m.add(InlineKeyboardButton(f"⚡ {acc['id']} အမြန်ဝယ်မယ်", callback_data=f"premium_flash_buy_{acc['id']}"))
-            m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
-            bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="HTML", reply_markup=m)
+                discount_amount = max(0, original_price - deal_price)
+                discount_pct = int(round(discount_amount * 100 / original_price)) if original_price > 0 else 0
+                text_card = (
+                    "🔥 <b>အထူးစပရှယ် လျော့စျေးအကောင့်</b>\n\n"
+                    f"🆔 <b>{acc['id']}</b>\n"
+                    f"💰 အရင်ဈေး — <s>{original_price:,} MMK</s>\n"
+                    f"🔥 ယခုဈေး — <b>{deal_price:,} MMK</b>\n"
+                    f"🎟️ အကောင့်လျော့စျေးကူပွန် — <b>-{discount_amount:,} MMK ({discount_pct}%)</b>\n"
+                    f"⏰ ကုန်ဆုံးချိန် — <b>{mins:02d}:{secs:02d}</b>\n\n"
+                    + format_account_wrapped(acc)
+                )
+
+                # Photos are sent separately; the text card always follows.
+                for photo in [p for p in (acc.get("photos") or []) if p][:15]:
+                    try:
+                        bot.send_photo(call.message.chat.id, photo)
+                    except Exception:
+                        logging.exception("Special deal photo send failed: %s", acc.get("id"))
+
+                m = InlineKeyboardMarkup(row_width=2)
+                m.row(
+                    InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
+                    InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
+                )
+                m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးမယ်", callback_data=f"premium_price_alert_{acc['db_id']}"))
+                m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+                bot.send_message(call.message.chat.id, text_card, parse_mode="HTML", reply_markup=m)
             return True
 
         if data.startswith("premium_flash_buy_"):
@@ -850,28 +876,6 @@ def install(original):
         bot.process_new_updates = intercepted_process
 
     # ------------------------------------------------------------
-    # Ensure feature schema survives the Supabase restore performed by
-    # supabase_launcher.start_original_bot(). The launcher calls main.init_db()
-    # after restoring shop.db, so patch main.init_db at runtime (source file
-    # remains untouched) and recreate ONLY our feature schema there.
-    # ------------------------------------------------------------
-    if not hasattr(original, "_premium_v6_original_init_db"):
-        original._premium_v6_original_init_db = original.init_db
-        _schema_lock = threading.RLock()
-
-        def _init_db_with_premium_schema(*args, **kwargs):
-            result = original._premium_v6_original_init_db(*args, **kwargs)
-            with _schema_lock:
-                init_feature_db()
-            return result
-
-        original.init_db = _init_db_with_premium_schema
-
-    # Run once now and also on every later main.init_db() call, including the
-    # init_db() call made by the launcher immediately after remote restore.
-    init_feature_db()
-
-    # ------------------------------------------------------------
     # Background notifications, kept independent and non-fatal.
     # ------------------------------------------------------------
     stop = threading.Event()
@@ -883,7 +887,6 @@ def install(original):
         nonlocal last_account_id, last_prices
         while not stop.wait(10):
             try:
-                init_feature_db()
                 current = rows("""
                     SELECT id, COALESCE(sale_price,price) AS p
                     FROM accounts
@@ -933,10 +936,23 @@ def install(original):
                                 except Exception:
                                     logging.exception("Price-drop notification failed")
                 last_prices = current_prices
-            except Exception:
+            except Exception as exc:
+                if "no such table" in str(exc).lower():
+                    try:
+                        init_feature_db()
+                        logging.info("Premium feature schema repaired after missing-table error")
+                        continue
+                    except Exception:
+                        logging.exception("Premium feature schema repair failed")
                 logging.exception("Premium feature monitor failed")
+
+    try:
+        init_feature_db()
+    except Exception:
+        logging.exception("Premium feature schema initialization failed before monitor start")
 
     threading.Thread(target=monitor, name="premium-feature-monitor-v4", daemon=True).start()
 
     # Expose only for diagnostics; not required by main.py.
     original.PREMIUM_FEATURES_V4_READY = True
+    logging.info("PREMIUM_FEATURES_V4_READY")
