@@ -1,801 +1,1294 @@
 """
-MLBB MARKET - Premium Features Module
---------------------------------------
-Standalone feature module. This file does NOT replace or rewrite main.py.
+MLBB MARKET - PREMIUM FEATURES ADDON
+-------------------------------------
+This file is intentionally separate from:
+    main.py
+    supabase_launcher.py
 
-Features included:
-1) ⚡ အမြန်ဝယ်မယ်
-2) 🔥 Flash Deal
-3) 🔔 ဈေးကျရင် အသိပေးမယ်
-4) ✅ Account Verified
-5) 👤 ကျွန်ုပ်၏အကောင့်
-6) 🆕 အသစ်တင်ထားတဲ့အကောင့်များ
-7) 🔎 အဆင့်မြင့်ရှာဖွေမယ်
-8) 🔔 အသစ်တင်အကောင့် အသိပေးချက်
-9) ❤️ သိမ်းထားတဲ့အကောင့်များ
+It does not replace either file. Call:
+    install(original_main_module)
 
-Integration design:
-- Import this module from the external launcher (or another bootstrap file).
-- The original main.py remains untouched.
-- The module creates only its own premium_* tables.
-- Existing account rows are read from the original SQLite DB.
-- Existing account IDs / photos / prices / statuses are not deleted or rewritten.
+The addon adds:
+1. ⚡ အမြန်ဝယ်
+2. 🔥 Flash Deal
+3. 🔔 ဈေးကျရင် အသိပေး
+4. ✅ Admin စစ်ဆေးပြီး (Verified)
+5. 👤 ကျွန်ုပ်၏အကောင့်
+6. 🆕 အသစ်တင်ထားတဲ့အကောင့်များ
+7. 🔎 အဆင့်မြင့်ရှာဖွေမယ်
+8. 🔔 အသစ်တင်အကောင့် အသိပေးချက်
+9. ❤️ သိမ်းထားတဲ့အကောင့်များ
 
-Expected integration call:
-    premium_features.install(
-        bot=original.bot,
-        db_connect=original.db_connect,
-        db_lock=original.db_lock,
-        admin_id=original.ADMIN_ID,
-        get_available_accounts=original.get_available_accounts,
-        get_account_by_text_id=original.get_account_by_text_id,
-        make_account_id=original.make_account_id,
-        log_user_activity=getattr(original, "log_user_activity", None),
-    )
-
-The module is intentionally independent from Supabase persistence. Keep the
-Supabase launcher and main.py as separate files.
+Design rule:
+- မူရင်း main.py ကို မပြင်ဘူး။
+- မူရင်း menu/flow တွေကို မဖျက်ဘူး။
+- Feature data ကို မူရင်း SQLite DB ထဲက သီးခြား tables နဲ့သာ သိမ်းတယ်။
+- Message cleanup / delete မလုပ်ဘူး။
 """
 
-from __future__ import annotations
-
-import html
-import re
-import sqlite3
-from contextlib import closing
-from datetime import datetime, timezone
-from typing import Any, Callable, Optional
-
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
+import threading
+import time
 
 
-INSTALLED = False
+def install(original):
+    """
+    Register premium features against the already-loaded original main module.
+    `original` is the imported main.py module.
+    """
+    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+    bot = original.bot
+    db_lock = original.db_lock
+    db_connect = original.db_connect
+    closing = original.closing
+    ADMIN_ID = original.ADMIN_ID
 
-def _safe_text(value: Any) -> str:
-    return html.escape(str(value or ""))
+    FEATURE_MORE = "premium_more"
+    MY_ACCOUNT = "premium_my_account"
 
+    # ------------------------------------------------------------------
+    # DB: only add new tables/column; never drop/reset existing data.
+    # ------------------------------------------------------------------
+    def init_feature_db():
+        with db_lock:
+            with closing(db_connect()) as conn:
+                cols = {r["name"] for r in conn.execute(
+                    "PRAGMA table_info(accounts)"
+                ).fetchall()}
 
-def _price(acc: dict[str, Any]) -> int:
-    try:
-        return int(acc.get("effective_price") or acc.get("sale_price") or acc.get("price") or 0)
-    except Exception:
-        return 0
+                if "is_verified" not in cols:
+                    conn.execute(
+                        "ALTER TABLE accounts "
+                        "ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0"
+                    )
 
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS favorites (
+                        user_id INTEGER NOT NULL,
+                        account_id INTEGER NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY(user_id, account_id)
+                    )
+                """)
 
-def _account_label(acc: dict[str, Any]) -> str:
-    status_map = {
-        "available": "🟢 ရရှိနိုင်",
-        "reserved": "🟡 ခဏယူထား",
-        "sold": "🔴 ရောင်းပြီး",
-        "hidden": "⚫ ဖျောက်ထား",
-    }
-    skins = " ".join(str(acc.get("skins") or "").replace("\n", " ").split())
-    if len(skins) > 90:
-        skins = skins[:89].rstrip() + "…"
-    lines = [
-        f"🆔 <b>{_safe_text(acc.get('id'))}</b>",
-        "🎮 <b>ML Account</b>",
-        f"📌 {status_map.get(acc.get('status'), _safe_text(acc.get('status')))}",
-    ]
-    if acc.get("is_new"):
-        lines.append("🆕 <b>အသစ်တင်ထားသည်</b>")
-    if acc.get("is_verified"):
-        lines.append("✅ <b>Admin စစ်ဆေးပြီး</b>")
-    if skins:
-        lines.append(f"🎨 <b>Skin:</b> {_safe_text(skins)}")
-    lines.append(f"💰 <b>{_price(acc):,} MMK</b>")
-    return "\n".join(lines)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS feature_settings (
+                        user_id INTEGER PRIMARY KEY,
+                        new_account_alert INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
 
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS price_alerts (
+                        user_id INTEGER NOT NULL,
+                        account_id INTEGER NOT NULL,
+                        last_price INTEGER NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY(user_id, account_id)
+                    )
+                """)
 
-def _menu(buttons: list[list[tuple[str, str]]], row_width: int = 2) -> InlineKeyboardMarkup:
-    markup = InlineKeyboardMarkup(row_width=row_width)
-    for row in buttons:
-        markup.row(*[InlineKeyboardButton(text, callback_data=data) for text, data in row])
-    return markup
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS flash_deals (
+                        account_id INTEGER PRIMARY KEY,
+                        deal_price INTEGER NOT NULL,
+                        ends_at TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
 
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_flash_deals_ends
+                    ON flash_deals(ends_at)
+                """)
 
-def _connect(db_connect: Callable[[], sqlite3.Connection]):
-    return closing(db_connect())
+                conn.commit()
 
+    init_feature_db()
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    def rows(sql, params=()):
+        with db_lock:
+            with closing(db_connect()) as conn:
+                return conn.execute(sql, params).fetchall()
 
-
-def _ensure_tables(db_connect: Callable[[], sqlite3.Connection], db_lock) -> None:
-    with db_lock:
-        with _connect(db_connect) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS premium_favorites (
-                    user_id INTEGER NOT NULL,
-                    account_id INTEGER NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, account_id)
-                )
-                """
+    def account_obj(account_id):
+        try:
+            return original.get_account_by_text_id(
+                original.make_account_id(int(account_id))
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS premium_alerts (
-                    user_id INTEGER PRIMARY KEY,
-                    max_price INTEGER,
-                    skin_keyword TEXT NOT NULL DEFAULT '',
-                    new_accounts INTEGER NOT NULL DEFAULT 0,
-                    price_drops INTEGER NOT NULL DEFAULT 0,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
+        except Exception:
+            return None
+
+    def flash_for(account_id):
+        found = rows(
+            "SELECT deal_price, ends_at FROM flash_deals WHERE account_id=?",
+            (int(account_id),),
+        )
+        if not found:
+            return None
+
+        try:
+            ends = datetime.fromisoformat(
+                str(found[0]["ends_at"]).replace("Z", "+00:00")
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS premium_views (
-                    user_id INTEGER NOT NULL,
-                    account_id INTEGER NOT NULL,
-                    viewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, account_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS premium_recent_searches (
-                    user_id INTEGER PRIMARY KEY,
-                    skin_keyword TEXT NOT NULL DEFAULT '',
-                    max_price INTEGER,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            # Verified flag is intentionally added only if it does not exist.
-            cols = {row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()}
-            if "is_verified" not in cols:
+            if ends.tzinfo is None:
+                ends = ends.replace(tzinfo=timezone.utc)
+
+            if ends <= datetime.now(timezone.utc):
+                with db_lock:
+                    with closing(db_connect()) as conn:
+                        conn.execute(
+                            "DELETE FROM flash_deals WHERE account_id=?",
+                            (int(account_id),),
+                        )
+                        conn.commit()
+                return None
+
+            return int(found[0]["deal_price"]), ends
+        except Exception:
+            return None
+
+    def add_favorite(user_id, account_id):
+        with db_lock:
+            with closing(db_connect()) as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM favorites WHERE user_id=? AND account_id=?",
+                    (int(user_id), int(account_id)),
+                ).fetchone()
+
+                if exists:
+                    conn.execute(
+                        "DELETE FROM favorites WHERE user_id=? AND account_id=?",
+                        (int(user_id), int(account_id)),
+                    )
+                    added = False
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO favorites(user_id, account_id) "
+                        "VALUES(?, ?)",
+                        (int(user_id), int(account_id)),
+                    )
+                    added = True
+
+                conn.commit()
+                return added
+
+    def favorite_ids(user_id):
+        result = rows(
+            "SELECT account_id FROM favorites "
+            "WHERE user_id=? ORDER BY created_at DESC",
+            (int(user_id),),
+        )
+        return [int(r["account_id"]) for r in result]
+
+    def new_alert_enabled(user_id):
+        result = rows(
+            "SELECT new_account_alert FROM feature_settings WHERE user_id=?",
+            (int(user_id),),
+        )
+        return bool(result and int(result[0]["new_account_alert"] or 0))
+
+    def set_new_alert(user_id, enabled):
+        with db_lock:
+            with closing(db_connect()) as conn:
+                conn.execute("""
+                    INSERT INTO feature_settings(user_id, new_account_alert)
+                    VALUES(?, ?)
+                    ON CONFLICT(user_id)
+                    DO UPDATE SET new_account_alert=excluded.new_account_alert
+                """, (int(user_id), 1 if enabled else 0))
+                conn.commit()
+
+    def set_price_alert(user_id, account_id):
+        acc = account_obj(account_id)
+        if not acc:
+            return None
+
+        current = int(acc.get("effective_price") or acc.get("price") or 0)
+
+        with db_lock:
+            with closing(db_connect()) as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM price_alerts WHERE user_id=? AND account_id=?",
+                    (int(user_id), int(account_id)),
+                ).fetchone()
+
+                if exists:
+                    conn.execute(
+                        "DELETE FROM price_alerts "
+                        "WHERE user_id=? AND account_id=?",
+                        (int(user_id), int(account_id)),
+                    )
+                    enabled = False
+                else:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO price_alerts(
+                            user_id, account_id, last_price
+                        ) VALUES(?, ?, ?)
+                    """, (int(user_id), int(account_id), current))
+                    enabled = True
+
+                conn.commit()
+        return enabled
+
+    def set_verified(account_id, enabled):
+        with db_lock:
+            with closing(db_connect()) as conn:
                 conn.execute(
-                    "ALTER TABLE accounts ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0"
+                    "UPDATE accounts SET is_verified=? WHERE id=?",
+                    (1 if enabled else 0, int(account_id)),
                 )
-            if "flash_deal_price" not in cols:
-                conn.execute("ALTER TABLE accounts ADD COLUMN flash_deal_price INTEGER")
-            if "flash_deal_until" not in cols:
-                conn.execute("ALTER TABLE accounts ADD COLUMN flash_deal_until TEXT")
-            conn.commit()
+                conn.commit()
 
+    def verified(account_id):
+        result = rows(
+            "SELECT is_verified FROM accounts WHERE id=?",
+            (int(account_id),),
+        )
+        return bool(result and int(result[0]["is_verified"] or 0))
 
-def _get_rows(
-    db_connect: Callable[[], sqlite3.Connection],
-    db_lock,
-    sql: str,
-    params: tuple = (),
-):
-    with db_lock:
-        with _connect(db_connect) as conn:
-            return conn.execute(sql, params).fetchall()
+    def set_flash(account_id, deal_price, minutes):
+        ends = datetime.now(timezone.utc) + timedelta(minutes=int(minutes))
+        with db_lock:
+            with closing(db_connect()) as conn:
+                conn.execute("""
+                    INSERT INTO flash_deals(account_id, deal_price, ends_at)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(account_id)
+                    DO UPDATE SET
+                        deal_price=excluded.deal_price,
+                        ends_at=excluded.ends_at
+                """, (int(account_id), int(deal_price), ends.isoformat()))
+                conn.commit()
 
+    # ------------------------------------------------------------------
+    # Display wrappers. Existing function output is preserved and only
+    # feature lines are added.
+    # ------------------------------------------------------------------
+    if not hasattr(original, "_premium_original_row_to_account"):
+        original._premium_original_row_to_account = original.row_to_account
 
-def _get_one(
-    db_connect: Callable[[], sqlite3.Connection],
-    db_lock,
-    sql: str,
-    params: tuple = (),
-):
-    with db_lock:
-        with _connect(db_connect) as conn:
-            return conn.execute(sql, params).fetchone()
+    if not hasattr(original, "_premium_original_format_account"):
+        original._premium_original_format_account = original.format_account
 
+    def wrapped_row_to_account(row):
+        acc = original._premium_original_row_to_account(row)
+        try:
+            keys = row.keys()
+            acc["is_verified"] = (
+                int(row["is_verified"] or 0)
+                if "is_verified" in keys else 0
+            )
+        except Exception:
+            acc["is_verified"] = 0
+        return acc
 
-def _is_alert_enabled(row) -> bool:
-    return bool(row and int(row["enabled"] or 0))
+    def wrapped_format_account(acc):
+        base = original._premium_original_format_account(acc)
+        lines = base.split("\n")
 
+        # Do not duplicate lines if this function is called more than once.
+        if acc.get("skins"):
+            if not any("Skin အတိုချုပ်" in x for x in lines):
+                insert_at = min(3, len(lines))
+                short_skins = str(acc.get("skins", "")).replace("\n", " ").strip()
+                if len(short_skins) > 100:
+                    short_skins = short_skins[:97] + "..."
+                lines.insert(
+                    insert_at,
+                    f"🎨 <b>Skin အတိုချုပ် — {short_skins}</b>",
+                )
 
-def _build_feature_menu() -> InlineKeyboardMarkup:
-    return _menu(
-        [
-            [("⚡ အမြန်ဝယ်မယ်", "pf_quick_buy"), ("🔥 Flash Deal", "pf_flash")],
-            [("🔎 အဆင့်မြင့်ရှာဖွေမယ်", "pf_advanced")],
-            [("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", "pf_new")],
-            [("❤️ သိမ်းထားတဲ့အကောင့်များ", "pf_favorites")],
-            [("🔔 အသစ်တင်/ဈေးကျ အသိပေးချက်", "pf_alerts")],
-            [("👤 ကျွန်ုပ်၏အကောင့်", "pf_profile")],
-            [("🏠 ပင်မ Menu", "home")],
-        ],
-        row_width=2,
-    )
+        if acc.get("is_verified"):
+            if not any("ADMIN စစ်ဆေးပြီး" in x for x in lines):
+                lines.insert(
+                    min(4, len(lines)),
+                    "✅ <b>ADMIN စစ်ဆေးပြီး</b>",
+                )
 
+        flash = flash_for(acc.get("db_id", 0))
+        if flash:
+            deal_price, _ = flash
+            if not any("FLASH DEAL" in x for x in lines):
+                lines.append(
+                    f"🔥 <b>FLASH DEAL — {deal_price:,} MMK</b>"
+                )
 
-def _account_buttons(
-    account: dict[str, Any],
-    include_favorite: bool = True,
-    include_quick_buy: bool = True,
-    back_callback: str = "pf_menu",
-) -> InlineKeyboardMarkup:
-    rows: list[list[tuple[str, str]]] = []
-    if account.get("status") == "available":
-        if include_quick_buy:
-            rows.append([("⚡ အမြန်ဝယ်မယ်", f"pf_quick_{account['id']}")])
-        rows.append([("🛒 ဒီအကောင့် ဝယ်မယ်", f"buy_confirm_{account['id']}")])
-    if include_favorite:
-        rows.append([("❤️ သိမ်းထားမယ်", f"pf_fav_add_{account['id']}")])
-    rows.append([("➡️ နောက်အကောင့်", f"pf_next_{account['id']}")])
-    rows.append([("🔙 Feature Menu", back_callback)])
-    return _menu(rows, row_width=2)
+        return "\n".join(lines)
 
+    original.row_to_account = wrapped_row_to_account
+    original.format_account = wrapped_format_account
 
-def _eligible_accounts(
-    get_available_accounts: Callable[[], list[dict[str, Any]]],
-    include_sold: bool = False,
-) -> list[dict[str, Any]]:
-    if not include_sold:
-        return list(get_available_accounts())
-    return []
+    # ------------------------------------------------------------------
+    # Menus: wrap, don't replace the original main/admin menus.
+    # ------------------------------------------------------------------
+    if not hasattr(original, "_premium_original_main_menu"):
+        original._premium_original_main_menu = original.main_menu
 
+    if not hasattr(original, "_premium_original_admin_keyboard"):
+        original._premium_original_admin_keyboard = original.admin_keyboard
 
-def install(
-    *,
-    bot,
-    db_connect: Callable[[], sqlite3.Connection],
-    db_lock,
-    admin_id: int,
-    get_available_accounts: Callable[[], list[dict[str, Any]]],
-    get_account_by_text_id: Callable[[str], Optional[dict[str, Any]]],
-    make_account_id: Callable[[int], str] | None = None,
-    log_user_activity: Callable[..., Any] | None = None,
-):
-    """Install all premium feature handlers into an existing TeleBot instance."""
-    global INSTALLED
-    if INSTALLED:
-        return
+    def premium_main_menu(user_id):
+        markup = original._premium_original_main_menu(user_id)
 
-    _ensure_tables(db_connect, db_lock)
+        # Keep existing buttons exactly as they are.
+        markup.add(
+            InlineKeyboardButton(
+                "👤 ကျွန်ုပ်၏အကောင့်",
+                callback_data=MY_ACCOUNT,
+            ),
+            InlineKeyboardButton(
+                "✨ အခြားအသုံးဝင်တဲ့ Features",
+                callback_data=FEATURE_MORE,
+            ),
+        )
+        return markup
 
-    def log(user, action: str, details: str = ""):
-        if log_user_activity:
-            try:
-                log_user_activity(user, action, details)
-            except Exception:
-                pass
+    def premium_admin_keyboard():
+        markup = original._premium_original_admin_keyboard()
+        markup.add(
+            InlineKeyboardButton(
+                "✨ Feature စီမံမယ်",
+                callback_data="premium_admin_tools",
+            )
+        )
+        return markup
 
-    def feature_menu_message(chat_id: int):
+    original.main_menu = premium_main_menu
+    original.admin_keyboard = premium_admin_keyboard
+
+    def feature_more_markup():
+        m = InlineKeyboardMarkup(row_width=2)
+        m.add(
+            InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
+            InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
+            InlineKeyboardButton("🔎 အဆင့်မြင့်ရှာဖွေမယ်", callback_data="premium_advanced_search"),
+            InlineKeyboardButton("🔥 Flash Deal အကောင့်များ", callback_data="premium_flash_deals"),
+            InlineKeyboardButton("✅ စစ်ဆေးပြီးအကောင့်များ", callback_data="premium_verified"),
+            InlineKeyboardButton("🔔 အသစ်တင်အသိပေးချက်", callback_data="premium_new_alert"),
+            InlineKeyboardButton("💡 Tips", callback_data="tips_menu"),
+            InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"),
+        )
+        return m
+
+    def feature_account_markup(acc, kind, index, total):
+        if kind == "favorites":
+            prev_cb, next_cb = "premium_fav_prev", "premium_fav_next"
+        elif kind == "new":
+            prev_cb, next_cb = "premium_new_prev", "premium_new_next"
+        elif kind == "verified":
+            prev_cb, next_cb = "premium_ver_prev", "premium_ver_next"
+        else:
+            prev_cb, next_cb = "premium_search_prev", "premium_search_next"
+
+        m = InlineKeyboardMarkup(row_width=2)
+        m.row(
+            InlineKeyboardButton("⬅️ အရင်အကောင့်", callback_data=prev_cb),
+            InlineKeyboardButton("နောက်အကောင့် ➡️", callback_data=next_cb),
+        )
+        m.row(
+            InlineKeyboardButton(
+                "⚡ အမြန်ဝယ်မယ်",
+                callback_data=f"premium_fast_buy_{acc['id']}",
+            ),
+            InlineKeyboardButton(
+                "❤️ သိမ်းထားမယ်",
+                callback_data=f"premium_fav_toggle_{acc['db_id']}",
+            ),
+        )
+        m.row(
+            InlineKeyboardButton(
+                "🔔 ဈေးကျရင် အသိပေးမယ်",
+                callback_data=f"premium_price_alert_{acc['db_id']}",
+            ),
+        )
+        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+        return m
+
+    def send_feature_account(chat_id, acc, kind, index, total):
+        if not acc:
+            bot.send_message(
+                chat_id,
+                "❌ ဒီအကောင့် မရှိတော့ပါ။",
+                reply_markup=original.back_button(),
+            )
+            return
+
+        # Use the original photo sender so existing Supabase-photo handling
+        # and existing account photo behavior remain untouched.
+        try:
+            original.send_account_photos(chat_id, acc, include_menu=False)
+        except Exception:
+            # Fallback to text if a photo cannot be sent.
+            bot.send_message(chat_id, wrapped_format_account(acc), parse_mode="HTML")
+
         bot.send_message(
             chat_id,
-            "✨ <b>Premium Features</b>\n\nလိုအပ်တဲ့ Feature ကို ရွေးပါ။",
+            f"🎯 <b>{index + 1} / {total}</b>\n\n{wrapped_format_account(acc)}",
             parse_mode="HTML",
-            reply_markup=_build_feature_menu(),
+            reply_markup=feature_account_markup(acc, kind, index, total),
         )
 
-    @bot.message_handler(commands=["features", "premium"])
-    def premium_command(message):
-        log(message.from_user, "premium_features")
-        feature_menu_message(message.chat.id)
+    def ids_from_favorites(user_id):
+        return [
+            original.make_account_id(x)
+            for x in favorite_ids(user_id)
+            if account_obj(x)
+        ]
 
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_menu")
-    def pf_menu(call):
-        bot.answer_callback_query(call.id)
-        feature_menu_message(call.message.chat.id)
-
-    # ------------------------------------------------------------------
-    # ❤️ Favorites
-    # ------------------------------------------------------------------
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_favorites")
-    def pf_favorites(call):
-        bot.answer_callback_query(call.id)
-        rows = _get_rows(
-            db_connect,
-            db_lock,
-            "SELECT account_id FROM premium_favorites WHERE user_id=? ORDER BY created_at DESC",
-            (call.from_user.id,),
+    def ids_from_new_accounts():
+        result = rows(
+            "SELECT id FROM accounts "
+            "WHERE status='available' ORDER BY id ASC"
         )
-        if not rows:
+        return [original.make_account_id(int(r["id"])) for r in result]
+
+    def ids_from_verified():
+        result = rows(
+            "SELECT id FROM accounts "
+            "WHERE status='available' AND is_verified=1 "
+            "ORDER BY id ASC"
+        )
+        return [original.make_account_id(int(r["id"])) for r in result]
+
+    def set_nav_state(user_id, kind, ids, index):
+        original.set_state(
+            user_id,
+            {
+                "flow": f"premium_{kind}",
+                "premium_ids": ids,
+                "premium_index": int(index),
+                "premium_kind": kind,
+            },
+        )
+
+    def show_nav_from_state(call, direction):
+        state = original.get_state(call.from_user.id)
+        ids = state.get("premium_ids", [])
+        if not ids:
             bot.send_message(
                 call.message.chat.id,
-                "❤️ <b>သိမ်းထားတဲ့အကောင့် မရှိသေးပါ။</b>\n\nကြိုက်တဲ့ Account မှာ <b>❤️ သိမ်းထားမယ်</b> ကိုနှိပ်ပြီး သိမ်းနိုင်ပါတယ်။",
-                parse_mode="HTML",
-                reply_markup=_build_feature_menu(),
+                "❌ ကြည့်ရန်အကောင့် မရှိသေးပါ။",
+                reply_markup=feature_more_markup(),
             )
             return
-        accounts = []
-        for row in rows:
-            acc = get_account_by_text_id(make_account_id(int(row["account_id"]))) if make_account_id else None
-            if acc and acc.get("status") != "hidden":
-                accounts.append(acc)
-        if not accounts:
-            bot.send_message(call.message.chat.id, "❤️ လောလောဆယ်ပြရန် သိမ်းထားတဲ့ Account မရှိပါ။", reply_markup=_build_feature_menu())
-            return
-        acc = accounts[0]
-        _record_view(call.from_user.id, acc["db_id"])
-        bot.send_message(
-            call.message.chat.id,
-            "❤️ <b>သိမ်းထားတဲ့အကောင့်</b>\n\n" + _account_label(acc),
-            parse_mode="HTML",
-            reply_markup=_account_buttons(acc),
-        )
 
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("pf_fav_add_"))
-    def pf_fav_add(call):
-        bot.answer_callback_query(call.id, "သိမ်းပြီးပါပြီ ❤️")
-        aid = call.data.replace("pf_fav_add_", "", 1)
-        acc = get_account_by_text_id(aid)
-        if not acc:
-            bot.send_message(call.message.chat.id, "❌ ဒီအကောင့် မရှိတော့ပါ။")
-            return
-        with db_lock:
-            with _connect(db_connect) as conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO premium_favorites(user_id, account_id) VALUES(?,?)",
-                    (call.from_user.id, acc["db_id"]),
-                )
-                conn.commit()
-        log(call.from_user, "favorite_add", acc["id"])
-        bot.send_message(
+        idx = int(state.get("premium_index", 0))
+        idx += int(direction)
+        idx %= len(ids)
+        state["premium_index"] = idx
+        original.set_state(call.from_user.id, state)
+
+        acc = original.get_account_by_text_id(ids[idx])
+        send_feature_account(
             call.message.chat.id,
-            f"❤️ <b>{_safe_text(acc['id'])}</b> ကို သိမ်းထားပြီးပါပြီ။",
-            parse_mode="HTML",
-            reply_markup=_account_buttons(acc),
+            acc,
+            state.get("premium_kind", "search"),
+            idx,
+            len(ids),
         )
 
     # ------------------------------------------------------------------
-    # 👤 Profile / history
+    # Menu callbacks
     # ------------------------------------------------------------------
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_profile")
-    def pf_profile(call):
+    @bot.callback_query_handler(func=lambda c: c.data == FEATURE_MORE)
+    def premium_more(call):
         bot.answer_callback_query(call.id)
-        fav = _get_one(db_connect, db_lock, "SELECT COUNT(*) n FROM premium_favorites WHERE user_id=?", (call.from_user.id,))["n"]
-        viewed = _get_one(db_connect, db_lock, "SELECT COUNT(*) n FROM premium_views WHERE user_id=?", (call.from_user.id,))["n"]
-        alert = _get_one(db_connect, db_lock, "SELECT * FROM premium_alerts WHERE user_id=?", (call.from_user.id,))
-        username = f"@{call.from_user.username}" if call.from_user.username else "Username မရှိပါ"
+        bot.send_message(
+            call.message.chat.id,
+            "✨ <b>အသုံးဝင်တဲ့ Features</b>\n\n"
+            "လိုချင်တဲ့ feature ကို ရွေးပါ။",
+            parse_mode="HTML",
+            reply_markup=feature_more_markup(),
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data == MY_ACCOUNT)
+    def premium_my_account(call):
+        bot.answer_callback_query(call.id)
+        uid = call.from_user.id
+        favs = len(favorite_ids(uid))
+        alert = "ဖွင့်ထားပါတယ် ✅" if new_alert_enabled(uid) else "ပိတ်ထားပါတယ် ❌"
+
         text = (
             "👤 <b>ကျွန်ုပ်၏အကောင့်</b>\n\n"
-            f"👤 {html.escape(username)}\n"
-            f"🆔 <code>{call.from_user.id}</code>\n\n"
-            f"❤️ သိမ်းထားတာ — <b>{fav}</b> ခု\n"
-            f"👀 ကြည့်ထားတာ — <b>{viewed}</b> ခု\n"
-            f"🔔 အသိပေးချက် — <b>{'ဖွင့်ထားသည်' if _is_alert_enabled(alert) else 'ပိတ်ထားသည်'}</b>"
-        )
-        bot.send_message(
-            call.message.chat.id,
-            text,
-            parse_mode="HTML",
-            reply_markup=_menu(
-                [
-                    [("❤️ သိမ်းထားတဲ့အကောင့်များ", "pf_favorites")],
-                    [("🕒 ကြည့်ထားခဲ့တဲ့အကောင့်များ", "pf_history")],
-                    [("🔔 အသိပေးချက်စီမံမယ်", "pf_alerts")],
-                    [("🔙 Feature Menu", "pf_menu")],
-                ],
-                row_width=1,
-            ),
+            f"🆔 User ID — <code>{uid}</code>\n"
+            f"❤️ သိမ်းထားတဲ့အကောင့် — <b>{favs}</b> ခု\n"
+            f"🔔 အသစ်တင်အသိပေးချက် — <b>{alert}</b>"
         )
 
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_history")
-    def pf_history(call):
-        bot.answer_callback_query(call.id)
-        rows = _get_rows(
-            db_connect,
-            db_lock,
-            "SELECT account_id FROM premium_views WHERE user_id=? ORDER BY viewed_at DESC LIMIT 15",
-            (call.from_user.id,),
+        m = InlineKeyboardMarkup(row_width=2)
+        m.add(
+            InlineKeyboardButton("❤️ သိမ်းထားတာကြည့်မယ်", callback_data="premium_favorites"),
+            InlineKeyboardButton("🆕 အသစ်တင်တာကြည့်မယ်", callback_data="premium_new_accounts"),
+            InlineKeyboardButton("🔔 အသိပေးချက်ပြောင်းမယ်", callback_data="premium_new_alert"),
+            InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"),
         )
-        accounts = []
-        for row in rows:
-            acc = get_account_by_text_id(make_account_id(int(row["account_id"]))) if make_account_id else None
-            if acc and acc.get("status") != "hidden":
-                accounts.append(acc)
-        if not accounts:
-            bot.send_message(call.message.chat.id, "🕒 ကြည့်ထားခဲ့တဲ့ Account မရှိသေးပါ။", reply_markup=_build_feature_menu())
-            return
-        acc = accounts[0]
-        bot.send_message(
-            call.message.chat.id,
-            "🕒 <b>မကြာသေးမီက ကြည့်ထားတဲ့အကောင့်</b>\n\n" + _account_label(acc),
-            parse_mode="HTML",
-            reply_markup=_account_buttons(acc),
-        )
-
-    def _record_view(user_id: int, db_id: int):
-        with db_lock:
-            with _connect(db_connect) as conn:
-                conn.execute(
-                    "INSERT INTO premium_views(user_id,account_id,viewed_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-                    "ON CONFLICT(user_id,account_id) DO UPDATE SET viewed_at=CURRENT_TIMESTAMP",
-                    (user_id, db_id),
-                )
-                conn.commit()
+        bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=m)
 
     # ------------------------------------------------------------------
-    # 🆕 New accounts
+    # Favorites
     # ------------------------------------------------------------------
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_new")
-    def pf_new(call):
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_favorites")
+    def premium_favorites(call):
         bot.answer_callback_query(call.id)
-        accounts = list(get_available_accounts())
-        # main.py calculates is_new; fall back to newest order if absent.
-        accounts.sort(key=lambda a: (not bool(a.get("is_new")), -int(a.get("db_id") or 0)))
-        accounts = accounts[:20]
-        if not accounts:
-            bot.send_message(call.message.chat.id, "🆕 အသစ်တင်ထားတဲ့ Account မရှိသေးပါ။", reply_markup=_build_feature_menu())
-            return
-        acc = accounts[0]
-        _record_view(call.from_user.id, acc["db_id"])
-        bot.send_message(
-            call.message.chat.id,
-            "🆕 <b>အသစ်တင်ထားတဲ့အကောင့်</b>\n\n" + _account_label(acc),
-            parse_mode="HTML",
-            reply_markup=_next_list_keyboard(acc, accounts, "pf_new"),
-        )
-
-    def _next_list_keyboard(current, accounts, back_callback: str):
-        idx = next((i for i, a in enumerate(accounts) if a["id"] == current["id"]), 0)
-        next_idx = (idx + 1) % len(accounts)
-        rows = []
-        if current.get("status") == "available":
-            rows.append([("⚡ အမြန်ဝယ်မယ်", f"pf_quick_{current['id']}")])
-        rows.append([("❤️ သိမ်းထားမယ်", f"pf_fav_add_{current['id']}")])
-        if len(accounts) > 1:
-            rows.append([("➡️ နောက်အကောင့်ဆက်ကြည့်မယ်", f"pf_listnext_{back_callback}_{next_idx}")])
-        rows.append([("🔙 Feature Menu", back_callback)])
-        return _menu(rows, row_width=1)
-
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("pf_listnext_"))
-    def pf_listnext(call):
-        bot.answer_callback_query(call.id)
-        _, _, rest = call.data.partition("pf_listnext_")
-        # Back callback is encoded before the final index.
-        try:
-            back_cb, index_text = rest.rsplit("_", 1)
-            idx = int(index_text)
-        except Exception:
-            back_cb, idx = "pf_new", 0
-        if back_cb == "pf_new":
-            accounts = list(get_available_accounts())
-            accounts.sort(key=lambda a: (not bool(a.get("is_new")), -int(a.get("db_id") or 0)))
-            accounts = accounts[:20]
-        elif back_cb == "pf_flash":
-            accounts = _flash_accounts()
-        else:
-            accounts = list(get_available_accounts())
-        if not accounts:
-            bot.send_message(call.message.chat.id, "❌ Account မရှိပါ။", reply_markup=_build_feature_menu())
-            return
-        acc = accounts[idx % len(accounts)]
-        _record_view(call.from_user.id, acc["db_id"])
-        bot.send_message(
-            call.message.chat.id,
-            _account_label(acc),
-            parse_mode="HTML",
-            reply_markup=_next_list_keyboard(acc, accounts, back_cb),
-        )
-
-    # ------------------------------------------------------------------
-    # ⚡ Quick buy
-    # ------------------------------------------------------------------
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_quick_buy")
-    def pf_quick_buy(call):
-        bot.answer_callback_query(call.id)
-        accounts = list(get_available_accounts())
-        if not accounts:
-            bot.send_message(call.message.chat.id, "⚡ လက်ရှိဝယ်လို့ရတဲ့ Account မရှိသေးပါ။", reply_markup=_build_feature_menu())
-            return
-        acc = accounts[0]
-        _record_view(call.from_user.id, acc["db_id"])
-        bot.send_message(
-            call.message.chat.id,
-            "⚡ <b>အမြန်ဝယ်မယ်</b>\n\n" + _account_label(acc),
-            parse_mode="HTML",
-            reply_markup=_menu(
-                [
-                    [("🛒 ဒီအကောင့် ဝယ်မယ်", f"buy_confirm_{acc['id']}")],
-                    [("➡️ နောက်အကောင့်", f"pf_quicknext_0")],
-                    [("🔙 Feature Menu", "pf_menu")],
-                ],
-                row_width=1,
-            ),
-        )
-
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("pf_quick_"))
-    def pf_quick_account(call):
-        bot.answer_callback_query(call.id)
-        aid = call.data.replace("pf_quick_", "", 1)
-        acc = get_account_by_text_id(aid)
-        if not acc or acc.get("status") != "available":
-            bot.send_message(call.message.chat.id, "❌ ဒီအကောင့်ကို လက်ရှိဝယ်လို့မရတော့ပါ။", reply_markup=_build_feature_menu())
-            return
-        _record_view(call.from_user.id, acc["db_id"])
-        bot.send_message(
-            call.message.chat.id,
-            "⚡ <b>အမြန်ဝယ်မယ်</b>\n\n" + _account_label(acc) + "\n\n👆 ဝယ်မယ်ကိုနှိပ်ပြီး ဆက်လုပ်ပါ။",
-            parse_mode="HTML",
-            reply_markup=_menu(
-                [
-                    [("🛒 ဒီအကောင့် ဝယ်မယ်", f"buy_confirm_{acc['id']}")],
-                    [("❤️ သိမ်းထားမယ်", f"pf_fav_add_{acc['id']}")],
-                    [("🔙 Feature Menu", "pf_menu")],
-                ],
-                row_width=1,
-            ),
-        )
-
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_quicknext_0")
-    def pf_quicknext(call):
-        bot.answer_callback_query(call.id)
-        accounts = list(get_available_accounts())
-        if not accounts:
-            bot.send_message(call.message.chat.id, "❌ Account မရှိပါ။", reply_markup=_build_feature_menu())
-            return
-        acc = accounts[0]
-        bot.send_message(call.message.chat.id, _account_label(acc), parse_mode="HTML", reply_markup=_account_buttons(acc))
-
-    # ------------------------------------------------------------------
-    # 🔥 Flash Deal
-    # ------------------------------------------------------------------
-    def _flash_accounts():
-        rows = _get_rows(
-            db_connect,
-            db_lock,
-            """
-            SELECT * FROM accounts
-            WHERE status='available'
-              AND flash_deal_price IS NOT NULL
-              AND flash_deal_price > 0
-              AND flash_deal_until IS NOT NULL
-              AND flash_deal_until > CURRENT_TIMESTAMP
-            ORDER BY flash_deal_until ASC, id ASC
-            """,
-        )
-        result = []
-        for row in rows:
-            d = dict(row)
-            d["id"] = f"ACC-{int(d['id']):03d}"
-            d["effective_price"] = int(d.get("flash_deal_price") or d["price"])
-            d["is_discounted"] = True
-            d["is_verified"] = bool(d.get("is_verified"))
-            d["photos"] = [x for x in str(d.get("photos") or "").split(",") if x]
-            result.append(d)
-        return result
-
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_flash")
-    def pf_flash(call):
-        bot.answer_callback_query(call.id)
-        accounts = _flash_accounts()
-        if not accounts:
+        ids = ids_from_favorites(call.from_user.id)
+        if not ids:
             bot.send_message(
                 call.message.chat.id,
-                "🔥 <b>Flash Deal လက်ရှိမရှိသေးပါ။</b>\n\nAdmin က Flash Deal တင်ပေးတဲ့အချိန် ပြန်လာကြည့်နိုင်ပါတယ်။",
+                "❤️ <b>သိမ်းထားတဲ့အကောင့် မရှိသေးပါ။</b>",
                 parse_mode="HTML",
-                reply_markup=_build_feature_menu(),
+                reply_markup=feature_more_markup(),
             )
             return
-        acc = accounts[0]
+        set_nav_state(call.from_user.id, "favorites", ids, 0)
+        send_feature_account(
+            call.message.chat.id,
+            original.get_account_by_text_id(ids[0]),
+            "favorites",
+            0,
+            len(ids),
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data in ("premium_fav_prev", "premium_fav_next"))
+    def premium_fav_nav(call):
+        bot.answer_callback_query(call.id)
+        show_nav_from_state(call, -1 if call.data.endswith("prev") else 1)
+
+    @bot.callback_query_handler(func=lambda c: c.data.startswith("premium_fav_toggle_"))
+    def premium_fav_toggle(call):
+        bot.answer_callback_query(call.id)
+        aid = int(call.data.replace("premium_fav_toggle_", "", 1))
+        acc = account_obj(aid)
+        if not acc:
+            bot.send_message(call.message.chat.id, "❌ Account မတွေ့ပါ။", reply_markup=feature_more_markup())
+            return
+
+        added = add_favorite(call.from_user.id, aid)
         bot.send_message(
             call.message.chat.id,
-            "🔥 <b>FLASH DEAL</b>\n\n" + _account_label(acc) + "\n\n⏰ သတ်မှတ်ထားတဲ့အချိန်အတွင်း ဝယ်ယူနိုင်ပါတယ်။",
+            (
+                f"❤️ <b>{acc['id']}</b> ကို သိမ်းထားလိုက်ပါပြီ။"
+                if added
+                else f"💔 <b>{acc['id']}</b> ကို သိမ်းထားတာ ဖြုတ်လိုက်ပါပြီ။"
+            ),
             parse_mode="HTML",
-            reply_markup=_next_list_keyboard(acc, accounts, "pf_flash"),
+            reply_markup=feature_more_markup(),
         )
 
     # ------------------------------------------------------------------
-    # 🔎 Advanced search
+    # New accounts
     # ------------------------------------------------------------------
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_advanced")
-    def pf_advanced(call):
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_new_accounts")
+    def premium_new_accounts(call):
         bot.answer_callback_query(call.id)
+        ids = ids_from_new_accounts()
+        if not ids:
+            bot.send_message(
+                call.message.chat.id,
+                "🆕 <b>အသစ်တင်ထားတဲ့အကောင့် မရှိသေးပါ။</b>",
+                parse_mode="HTML",
+                reply_markup=feature_more_markup(),
+            )
+            return
+        set_nav_state(call.from_user.id, "new", ids, 0)
+        send_feature_account(
+            call.message.chat.id,
+            original.get_account_by_text_id(ids[0]),
+            "new",
+            0,
+            len(ids),
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data in ("premium_new_prev", "premium_new_next"))
+    def premium_new_nav(call):
+        bot.answer_callback_query(call.id)
+        show_nav_from_state(call, -1 if call.data.endswith("prev") else 1)
+
+    # ------------------------------------------------------------------
+    # Verified
+    # ------------------------------------------------------------------
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_verified")
+    def premium_verified(call):
+        bot.answer_callback_query(call.id)
+        ids = ids_from_verified()
+        if not ids:
+            bot.send_message(
+                call.message.chat.id,
+                "✅ <b>စစ်ဆေးပြီးအကောင့် မရှိသေးပါ။</b>",
+                parse_mode="HTML",
+                reply_markup=feature_more_markup(),
+            )
+            return
+        set_nav_state(call.from_user.id, "verified", ids, 0)
+        send_feature_account(
+            call.message.chat.id,
+            original.get_account_by_text_id(ids[0]),
+            "verified",
+            0,
+            len(ids),
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data in ("premium_ver_prev", "premium_ver_next"))
+    def premium_ver_nav(call):
+        bot.answer_callback_query(call.id)
+        show_nav_from_state(call, -1 if call.data.endswith("prev") else 1)
+
+    # ------------------------------------------------------------------
+    # New-account alerts
+    # ------------------------------------------------------------------
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_new_alert")
+    def premium_new_alert(call):
+        bot.answer_callback_query(call.id)
+        enabled = not new_alert_enabled(call.from_user.id)
+        set_new_alert(call.from_user.id, enabled)
         bot.send_message(
+            call.message.chat.id,
+            (
+                "🔔 <b>အသစ်တင်အကောင့် အသိပေးချက် ဖွင့်ပြီးပါပြီ။</b>"
+                if enabled
+                else "🔕 <b>အသစ်တင်အကောင့် အသိပေးချက် ပိတ်ပြီးပါပြီ။</b>"
+            ),
+            parse_mode="HTML",
+            reply_markup=feature_more_markup(),
+        )
+
+    # ------------------------------------------------------------------
+    # Price alerts
+    # ------------------------------------------------------------------
+    @bot.callback_query_handler(func=lambda c: c.data.startswith("premium_price_alert_"))
+    def premium_price_alert(call):
+        bot.answer_callback_query(call.id)
+        aid = int(call.data.replace("premium_price_alert_", "", 1))
+        acc = account_obj(aid)
+        enabled = set_price_alert(call.from_user.id, aid) if acc else None
+
+        if enabled is None:
+            bot.send_message(call.message.chat.id, "❌ Account မတွေ့ပါ။", reply_markup=feature_more_markup())
+            return
+
+        bot.send_message(
+            call.message.chat.id,
+            (
+                f"🔔 <b>{acc['id']}</b> ဈေးကျရင် အသိပေးပါမယ်။"
+                if enabled
+                else f"🔕 <b>{acc['id']}</b> ရဲ့ ဈေးကျအသိပေးချက်ကို ပိတ်လိုက်ပါပြီ။"
+            ),
+            parse_mode="HTML",
+            reply_markup=feature_more_markup(),
+        )
+
+    # ------------------------------------------------------------------
+    # Fast buy
+    # ------------------------------------------------------------------
+    @bot.callback_query_handler(func=lambda c: c.data.startswith("premium_fast_buy_"))
+    def premium_fast_buy(call):
+        bot.answer_callback_query(call.id)
+        aid = call.data.replace("premium_fast_buy_", "", 1)
+        acc = original.get_account_by_text_id(aid)
+
+        if not acc or acc.get("status") != "available":
+            bot.send_message(
+                call.message.chat.id,
+                "❌ ဒီအကောင့် လက်ရှိ ဝယ်ယူလို့မရတော့ပါ။",
+                reply_markup=feature_more_markup(),
+            )
+            return
+
+        deal = flash_for(acc["db_id"])
+        price = deal[0] if deal else int(acc.get("effective_price") or acc["price"])
+
+        m = InlineKeyboardMarkup(row_width=1)
+        if original.ADMIN_USERNAME:
+            m.add(
+                InlineKeyboardButton(
+                    "👨‍💻 Admin ကို တိုက်ရိုက်ဆက်သွယ်မယ်",
+                    url=f"https://t.me/{original.ADMIN_USERNAME}",
+                )
+            )
+        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+
+        bot.send_message(
+            call.message.chat.id,
+            f"⚡ <b>အမြန်ဝယ်ယူမယ်</b>\n\n"
+            f"{wrapped_format_account(acc)}\n\n"
+            f"💰 <b>ဝယ်ဈေး — {price:,} MMK</b>\n\n"
+            "ဝယ်ယူဖို့ Admin ကို တိုက်ရိုက်ဆက်သွယ်နိုင်ပါတယ်။",
+            parse_mode="HTML",
+            reply_markup=m,
+        )
+
+    # ------------------------------------------------------------------
+    # Advanced search
+    # ------------------------------------------------------------------
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_advanced_search")
+    def premium_advanced_search_start(call):
+        bot.answer_callback_query(call.id)
+        original.set_state(call.from_user.id, {"flow": "premium_advanced_search"})
+        msg = bot.send_message(
             call.message.chat.id,
             "🔎 <b>အဆင့်မြင့်ရှာဖွေမယ်</b>\n\n"
-            "ဒီလိုပုံစံနဲ့ ရိုက်ပေးပါ —\n"
-            "<code>Gusion | 200000</code>\n\n"
-            "Skin မသတ်မှတ်ချင်ရင် —\n"
-            "<code>Any | 200000</code>",
+            "ဒီလိုပုံစံနဲ့ ရိုက်ပို့ပါ —\n"
+            "<code>Skin | အနည်းဆုံးဈေး | အများဆုံးဈေး</code>\n\n"
+            "ဥပမာ — <code>Collector | 100000 | 200000</code>\n"
+            "Skin မသတ်မှတ်ချင်ရင် — <code>Any | 0 | 150000</code>",
             parse_mode="HTML",
-            reply_markup=_menu([[('🔙 Feature Menu', 'pf_menu')]], row_width=1),
+            reply_markup=original.back_button(),
         )
-        bot.register_next_step_handler(call.message, _receive_advanced_search)
+        bot.register_next_step_handler(msg, premium_advanced_search_receive)
 
-    def _receive_advanced_search(message):
+    def premium_advanced_search_receive(message):
         raw = (message.text or "").strip()
-        parts = [x.strip() for x in raw.split("|", 1)]
-        if len(parts) != 2:
-            m = re.match(r"^(.*?)\s+([0-9][0-9, ]*)\s*$", raw)
-            if m:
-                parts = [m.group(1).strip(), m.group(2).strip()]
-        if len(parts) != 2:
-            bot.send_message(message.chat.id, "❌ Format မမှန်ပါ။ <code>Gusion | 200000</code> လို့ ရိုက်ပေးပါ။", parse_mode="HTML")
+        parts = [x.strip() for x in raw.split("|", 2)]
+
+        if len(parts) != 3:
+            msg = bot.send_message(
+                message.chat.id,
+                "❌ Format မမှန်ပါ။\n"
+                "<code>Collector | 100000 | 200000</code>",
+                parse_mode="HTML",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(msg, premium_advanced_search_receive)
             return
+
         skin = parts[0]
         if skin.lower() in ("any", "all", "အကုန်", "အားလုံး"):
             skin = ""
+
         try:
-            budget = int(parts[1].replace(",", "").replace(" ", ""))
-            if budget <= 0:
+            min_price = int(parts[1].replace(",", "").replace(" ", ""))
+            max_price = int(parts[2].replace(",", "").replace(" ", ""))
+            if min_price < 0 or max_price <= 0 or min_price > max_price:
                 raise ValueError
         except Exception:
-            bot.send_message(message.chat.id, "❌ Budget မမှန်ပါ။")
+            msg = bot.send_message(
+                message.chat.id,
+                "❌ ဈေးနှုန်း မမှန်ပါ။",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(msg, premium_advanced_search_receive)
             return
-        accounts = list(get_available_accounts())
-        terms = [t for t in skin.lower().split() if t]
+
         scored = []
-        for acc in accounts:
-            price = _price(acc)
-            if price > budget:
+        for acc in original.get_available_accounts():
+            price = int(acc.get("effective_price") or acc["price"])
+            if not (min_price <= price <= max_price):
                 continue
-            hay = f"{acc.get('title','')} {acc.get('skins','')}".lower()
-            score = sum(1 for t in terms if t in hay)
-            if not terms or score > 0:
-                # Best match first, then lower price, then older ACC order.
-                scored.append((score, -price, -int(acc.get("db_id") or 0), acc))
-        scored.sort(reverse=True, key=lambda x: x[:3])
-        results = [x[3] for x in scored][:20]
-        with db_lock:
-            with _connect(db_connect) as conn:
-                conn.execute(
-                    "INSERT INTO premium_recent_searches(user_id,skin_keyword,max_price,updated_at) VALUES(?,?,?,?) "
-                    "ON CONFLICT(user_id) DO UPDATE SET skin_keyword=excluded.skin_keyword,max_price=excluded.max_price,updated_at=excluded.updated_at",
-                    (message.from_user.id, skin, budget, _now_iso()),
-                )
-                conn.commit()
-        log(message.from_user, "premium_search", f"{skin}|{budget}")
-        if not results:
-            bot.send_message(message.chat.id, "❌ အနီးစပ်ဆုံး Account မတွေ့သေးပါ။", reply_markup=_build_feature_menu())
-            return
-        acc = results[0]
-        _record_view(message.from_user.id, acc["db_id"])
-        bot.send_message(
-            message.chat.id,
-            "🎯 <b>အနီးစပ်ဆုံး Account</b>\n\n" + _account_label(acc),
-            parse_mode="HTML",
-            reply_markup=_search_nav_keyboard(results, 0),
-        )
 
-    def _search_nav_keyboard(results: list[dict[str, Any]], idx: int):
-        acc = results[idx]
-        rows = []
-        if acc.get("status") == "available":
-            rows.append([("⚡ အမြန်ဝယ်မယ်", f"pf_quick_{acc['id']}")])
-        rows.append([("❤️ သိမ်းထားမယ်", f"pf_fav_add_{acc['id']}")])
-        if len(results) > 1:
-            prev_idx = (idx - 1) % len(results)
-            next_idx = (idx + 1) % len(results)
-            rows.append([("⬅️ အရင်အကောင့်", f"pf_search_nav_{prev_idx}"), ("➡️ နောက်အကောင့်", f"pf_search_nav_{next_idx}")])
-        rows.append([("🔙 Feature Menu", "pf_menu")])
-        # Store search result IDs in user's recent search table only; callback index resolves from same query.
-        return _menu(rows, row_width=2)
+            hay = " ".join(
+                [str(acc.get("title", "")), str(acc.get("skins", ""))]
+            ).lower()
 
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("pf_search_nav_"))
-    def pf_search_nav(call):
-        bot.answer_callback_query(call.id)
-        row = _get_one(db_connect, db_lock, "SELECT skin_keyword,max_price FROM premium_recent_searches WHERE user_id=?", (call.from_user.id,))
-        accounts = list(get_available_accounts())
-        if row:
-            skin = str(row["skin_keyword"] or "").lower().strip()
-            budget = int(row["max_price"] or 0)
-            terms = [t for t in skin.split() if t]
-            scored = []
-            for acc in accounts:
-                if budget and _price(acc) > budget:
+            if skin:
+                target = skin.lower()
+                score = SequenceMatcher(None, target, hay).ratio() * 100
+                for token in hay.replace(",", " ").split():
+                    score = max(
+                        score,
+                        SequenceMatcher(None, target, token).ratio() * 100,
+                    )
+                if target in hay:
+                    score += 35
+                if score < 22:
                     continue
-                hay = f"{acc.get('title','')} {acc.get('skins','')}".lower()
-                score = sum(1 for t in terms if t in hay)
-                if not terms or score > 0:
-                    scored.append((score, -_price(acc), -int(acc.get('db_id') or 0), acc))
-            scored.sort(reverse=True, key=lambda x: x[:3])
-            accounts = [x[3] for x in scored][:20]
-        if not accounts:
-            bot.send_message(call.message.chat.id, "❌ Search result မရှိတော့ပါ။", reply_markup=_build_feature_menu())
+            else:
+                score = 1
+
+            scored.append((score, acc))
+
+        scored.sort(
+            key=lambda item: (
+                -item[0],
+                int(item[1].get("effective_price") or item[1]["price"]),
+                int(item[1]["db_id"]),
+            )
+        )
+
+        ids = [acc["id"] for _, acc in scored]
+        if not ids:
+            bot.send_message(
+                message.chat.id,
+                "❌ အနီးစပ်ဆုံး Account မတွေ့သေးပါ။",
+                reply_markup=feature_more_markup(),
+            )
             return
-        try:
-            idx = int(call.data.replace("pf_search_nav_", "")) % len(accounts)
-        except Exception:
-            idx = 0
-        acc = accounts[idx]
-        _record_view(call.from_user.id, acc["db_id"])
+
+        original.set_state(
+            message.from_user.id,
+            {
+                "flow": "premium_search",
+                "premium_ids": ids,
+                "premium_index": 0,
+                "premium_kind": "search",
+            },
+        )
+
+        send_feature_account(
+            message.chat.id,
+            original.get_account_by_text_id(ids[0]),
+            "search",
+            0,
+            len(ids),
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data in ("premium_search_prev", "premium_search_next"))
+    def premium_search_nav(call):
+        bot.answer_callback_query(call.id)
+        show_nav_from_state(call, -1 if call.data.endswith("prev") else 1)
+
+    # ------------------------------------------------------------------
+    # Flash deals
+    # ------------------------------------------------------------------
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_flash_deals")
+    def premium_flash_deals(call):
+        bot.answer_callback_query(call.id)
+
+        active = []
+        for r in rows(
+            "SELECT account_id, deal_price, ends_at "
+            "FROM flash_deals ORDER BY ends_at ASC"
+        ):
+            deal = flash_for(int(r["account_id"]))
+            acc = account_obj(int(r["account_id"]))
+            if deal and acc and acc.get("status") == "available":
+                active.append((acc, deal[0], deal[1]))
+
+        if not active:
+            bot.send_message(
+                call.message.chat.id,
+                "🔥 လက်ရှိ Flash Deal မရှိသေးပါ။",
+                reply_markup=feature_more_markup(),
+            )
+            return
+
+        m = InlineKeyboardMarkup(row_width=1)
+        lines = ["🔥 <b>FLASH DEAL အကောင့်များ</b>\n"]
+
+        for acc, price, ends in active:
+            remain = max(0, int((ends - datetime.now(timezone.utc)).total_seconds()))
+            minutes = remain // 60
+            seconds = remain % 60
+            lines.append(
+                f"🆔 <b>{acc['id']}</b> — "
+                f"🔥 <b>{price:,} MMK</b> — "
+                f"⏰ {minutes:02d}:{seconds:02d}"
+            )
+            m.add(
+                InlineKeyboardButton(
+                    f"⚡ {acc['id']} အမြန်ဝယ်မယ်",
+                    callback_data=f"premium_flash_buy_{acc['id']}",
+                )
+            )
+
+        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
         bot.send_message(
             call.message.chat.id,
-            "🎯 <b>အနီးစပ်ဆုံး Account</b>\n\n" + _account_label(acc),
+            "\n".join(lines),
             parse_mode="HTML",
-            reply_markup=_search_nav_keyboard(accounts, idx),
+            reply_markup=m,
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data.startswith("premium_flash_buy_"))
+    def premium_flash_buy(call):
+        bot.answer_callback_query(call.id)
+        aid = call.data.replace("premium_flash_buy_", "", 1)
+        acc = original.get_account_by_text_id(aid)
+        deal = flash_for(acc["db_id"]) if acc else None
+
+        if not acc or not deal:
+            bot.send_message(
+                call.message.chat.id,
+                "❌ Flash Deal သက်တမ်းကုန်သွားပါပြီ။",
+                reply_markup=feature_more_markup(),
+            )
+            return
+
+        price = deal[0]
+        m = InlineKeyboardMarkup(row_width=1)
+        if original.ADMIN_USERNAME:
+            m.add(
+                InlineKeyboardButton(
+                    "👨‍💻 Admin ကို ဆက်သွယ်မယ်",
+                    url=f"https://t.me/{original.ADMIN_USERNAME}",
+                )
+            )
+        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+
+        bot.send_message(
+            call.message.chat.id,
+            f"🔥 <b>FLASH DEAL</b>\n\n"
+            f"{wrapped_format_account(acc)}\n\n"
+            f"💰 <b>{price:,} MMK</b>\n\n"
+            "⚡ ဒီဈေးနဲ့ ဝယ်ယူဖို့ Admin ကို ဆက်သွယ်ပါ။",
+            parse_mode="HTML",
+            reply_markup=m,
         )
 
     # ------------------------------------------------------------------
-    # 🔔 Alerts: new accounts / price drops
+    # Admin feature tools
     # ------------------------------------------------------------------
-    @bot.callback_query_handler(func=lambda c: c.data == "pf_alerts")
-    def pf_alerts(call):
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_admin_tools")
+    def premium_admin_tools(call):
+        if call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(
+                call.id,
+                "Admin သာ အသုံးပြုနိုင်ပါတယ်။",
+                show_alert=True,
+            )
+            return
+
         bot.answer_callback_query(call.id)
-        row = _get_one(db_connect, db_lock, "SELECT * FROM premium_alerts WHERE user_id=?", (call.from_user.id,))
-        enabled = int(row["enabled"] or 0) if row else 0
-        bot.send_message(
-            call.message.chat.id,
-            "🔔 <b>အသိပေးချက် စီမံမယ်</b>\n\n"
-            "🆕 အသစ်တင် Account အသိပေးချက်\n"
-            "💸 ဈေးကျသွားရင် အသိပေးချက်\n\n"
-            f"လက်ရှိအခြေအနေ — <b>{'ဖွင့်ထားသည်' if enabled else 'ပိတ်ထားသည်'}</b>",
-            parse_mode="HTML",
-            reply_markup=_menu(
-                [
-                    [("✅ အသစ်တင် Account အသိပေးချက် ဖွင့်", "pf_alert_new_on")],
-                    [("✅ ဈေးကျရင် အသိပေးချက် ဖွင့်", "pf_alert_drop_on")],
-                    [("🔕 အသိပေးချက် ပိတ်မယ်", "pf_alert_off")],
-                    [("🔙 Feature Menu", "pf_menu")],
-                ],
-                row_width=1,
+        m = InlineKeyboardMarkup(row_width=1)
+        m.add(
+            InlineKeyboardButton(
+                "🔥 Flash Deal စီမံမယ်",
+                callback_data="premium_admin_flash_list",
+            ),
+            InlineKeyboardButton(
+                "✅ Verified စီမံမယ်",
+                callback_data="premium_admin_verified_list",
+            ),
+            InlineKeyboardButton(
+                "🔔 အသိပေးချက် အသုံးပြုသူများ",
+                callback_data="premium_admin_alert_stats",
+            ),
+            InlineKeyboardButton(
+                "🏠 Admin Menu",
+                callback_data="admin_home",
             ),
         )
+        bot.send_message(
+            ADMIN_ID,
+            "✨ <b>Feature စီမံမယ်</b>",
+            parse_mode="HTML",
+            reply_markup=m,
+        )
 
-    def _set_alert(user_id: int, **updates):
-        current = _get_one(db_connect, db_lock, "SELECT * FROM premium_alerts WHERE user_id=?", (user_id,))
-        values = {
-            "max_price": current["max_price"] if current else None,
-            "skin_keyword": current["skin_keyword"] if current else "",
-            "new_accounts": int(current["new_accounts"] or 0) if current else 0,
-            "price_drops": int(current["price_drops"] or 0) if current else 0,
-            "enabled": int(current["enabled"] or 0) if current else 0,
-        }
-        values.update(updates)
-        with db_lock:
-            with _connect(db_connect) as conn:
-                conn.execute(
-                    "INSERT INTO premium_alerts(user_id,max_price,skin_keyword,new_accounts,price_drops,enabled,updated_at) VALUES(?,?,?,?,?,?,?) "
-                    "ON CONFLICT(user_id) DO UPDATE SET max_price=excluded.max_price,skin_keyword=excluded.skin_keyword,new_accounts=excluded.new_accounts,price_drops=excluded.price_drops,enabled=excluded.enabled,updated_at=excluded.updated_at",
-                    (user_id, values["max_price"], values["skin_keyword"], values["new_accounts"], values["price_drops"], values["enabled"], _now_iso()),
-                )
-                conn.commit()
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_admin_flash_list")
+    def premium_admin_flash_list(call):
+        if call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+            return
 
-    @bot.callback_query_handler(func=lambda c: c.data in ("pf_alert_new_on", "pf_alert_drop_on", "pf_alert_off"))
-    def pf_alert_toggle(call):
         bot.answer_callback_query(call.id)
-        if call.data == "pf_alert_new_on":
-            _set_alert(call.from_user.id, new_accounts=1, enabled=1)
-            msg = "🆕 အသစ်တင် Account အသိပေးချက် ဖွင့်ပြီးပါပြီ။"
-        elif call.data == "pf_alert_drop_on":
-            _set_alert(call.from_user.id, price_drops=1, enabled=1)
-            msg = "💸 ဈေးကျရင် အသိပေးချက် ဖွင့်ပြီးပါပြီ။"
-        else:
-            _set_alert(call.from_user.id, enabled=0)
-            msg = "🔕 အသိပေးချက် ပိတ်ပြီးပါပြီ။"
-        bot.send_message(call.message.chat.id, msg, reply_markup=_build_feature_menu())
-
-    # ------------------------------------------------------------------
-    # ✅ Verified / 🔔 Price Drop helper broadcasts for external code/admin
-    # ------------------------------------------------------------------
-    def set_verified(account_id: str, verified: bool = True) -> bool:
-        acc = get_account_by_text_id(account_id)
-        if not acc:
-            return False
-        with db_lock:
-            with _connect(db_connect) as conn:
-                conn.execute("UPDATE accounts SET is_verified=? WHERE id=?", (1 if verified else 0, acc["db_id"]))
-                conn.commit()
-        return True
-
-    def set_flash_deal(account_id: str, deal_price: int, until_utc: str) -> bool:
-        acc = get_account_by_text_id(account_id)
-        if not acc or deal_price <= 0:
-            return False
-        with db_lock:
-            with _connect(db_connect) as conn:
-                conn.execute(
-                    "UPDATE accounts SET flash_deal_price=?, flash_deal_until=? WHERE id=?",
-                    (int(deal_price), until_utc, acc["db_id"]),
+        m = InlineKeyboardMarkup(row_width=1)
+        for acc in original.get_admin_accounts(status="available")[:50]:
+            m.add(
+                InlineKeyboardButton(
+                    f"🔥 {acc['id']} — {acc['effective_price']:,} MMK",
+                    callback_data=f"premium_admin_flash_{acc['id']}",
                 )
-                conn.commit()
-        return True
+            )
+        m.add(
+            InlineKeyboardButton(
+                "🔙 Feature စီမံမယ်",
+                callback_data="premium_admin_tools",
+            )
+        )
+        bot.send_message(
+            ADMIN_ID,
+            "🔥 Flash Deal တင်မယ့် Account ကို ရွေးပါ။",
+            reply_markup=m,
+        )
 
-    def clear_flash_deal(account_id: str) -> bool:
-        acc = get_account_by_text_id(account_id)
+    @bot.callback_query_handler(func=lambda c: c.data.startswith("premium_admin_flash_"))
+    def premium_admin_flash_start(call):
+        if call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id)
+        aid = call.data.replace("premium_admin_flash_", "", 1)
+        acc = original.get_account_by_text_id(aid)
         if not acc:
-            return False
-        with db_lock:
-            with _connect(db_connect) as conn:
-                conn.execute("UPDATE accounts SET flash_deal_price=NULL, flash_deal_until=NULL WHERE id=?", (acc["db_id"],))
-                conn.commit()
-        return True
+            bot.send_message(ADMIN_ID, "❌ Account မတွေ့ပါ။", reply_markup=original.admin_keyboard())
+            return
 
-    # Expose helpers on the module for launcher/admin integrations.
-    install.set_verified = set_verified  # type: ignore[attr-defined]
-    install.set_flash_deal = set_flash_deal  # type: ignore[attr-defined]
-    install.clear_flash_deal = clear_flash_deal  # type: ignore[attr-defined]
-    install.feature_menu = _build_feature_menu  # type: ignore[attr-defined]
+        original.set_state(
+            ADMIN_ID,
+            {
+                "flow": "premium_admin_flash",
+                "premium_flash_account_id": aid,
+            },
+        )
 
-    INSTALLED = True
+        msg = bot.send_message(
+            ADMIN_ID,
+            f"🔥 <b>{aid}</b> Flash Deal\n\n"
+            "ဒီပုံစံနဲ့ ရိုက်ပါ — <code>Deal ဈေး | မိနစ်</code>\n"
+            "ဥပမာ — <code>90000 | 60</code>",
+            parse_mode="HTML",
+            reply_markup=original.back_button(),
+        )
+        bot.register_next_step_handler(msg, premium_admin_flash_receive)
 
+    def premium_admin_flash_receive(message):
+        if message.from_user.id != ADMIN_ID:
+            return
 
-__all__ = ["install", "INSTALLED"]
+        state = original.get_state(ADMIN_ID)
+        if state.get("flow") != "premium_admin_flash":
+            return
+
+        parts = [x.strip() for x in (message.text or "").split("|", 1)]
+        if len(parts) != 2:
+            msg = bot.send_message(
+                ADMIN_ID,
+                "❌ Format မမှန်ပါ။ <code>90000 | 60</code>",
+                parse_mode="HTML",
+            )
+            bot.register_next_step_handler(msg, premium_admin_flash_receive)
+            return
+
+        try:
+            deal_price = int(parts[0].replace(",", "").replace(" ", ""))
+            minutes = int(parts[1])
+            if deal_price <= 0 or minutes <= 0:
+                raise ValueError
+        except Exception:
+            msg = bot.send_message(
+                ADMIN_ID,
+                "❌ ဈေး/အချိန် မမှန်ပါ။",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(msg, premium_admin_flash_receive)
+            return
+
+        aid = state.get("premium_flash_account_id")
+        acc = original.get_account_by_text_id(aid)
+        if not acc:
+            original.clear_state(ADMIN_ID)
+            bot.send_message(ADMIN_ID, "❌ Account မတွေ့ပါ။", reply_markup=original.admin_keyboard())
+            return
+
+        set_flash(acc["db_id"], deal_price, minutes)
+        original.clear_state(ADMIN_ID)
+
+        bot.send_message(
+            ADMIN_ID,
+            f"✅ <b>{aid}</b> Flash Deal တင်ပြီးပါပြီ။\n\n"
+            f"🔥 Deal ဈေး — {deal_price:,} MMK\n"
+            f"⏰ သက်တမ်း — {minutes} မိနစ်",
+            parse_mode="HTML",
+            reply_markup=original.admin_keyboard(),
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_admin_verified_list")
+    def premium_admin_verified_list(call):
+        if call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id)
+        m = InlineKeyboardMarkup(row_width=1)
+        for acc in original.get_admin_accounts()[:50]:
+            icon = "✅" if verified(acc["db_id"]) else "⬜"
+            m.add(
+                InlineKeyboardButton(
+                    f"{icon} {acc['id']}",
+                    callback_data=f"premium_admin_verify_{acc['db_id']}",
+                )
+            )
+        m.add(
+            InlineKeyboardButton(
+                "🔙 Feature စီမံမယ်",
+                callback_data="premium_admin_tools",
+            )
+        )
+        bot.send_message(
+            ADMIN_ID,
+            "✅ Verified လုပ်/ဖြုတ်မယ့် Account ကို ရွေးပါ။",
+            reply_markup=m,
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data.startswith("premium_admin_verify_"))
+    def premium_admin_verify(call):
+        if call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id)
+        aid = int(call.data.replace("premium_admin_verify_", "", 1))
+        acc = account_obj(aid)
+        if not acc:
+            bot.send_message(ADMIN_ID, "❌ Account မတွေ့ပါ။", reply_markup=original.admin_keyboard())
+            return
+
+        enabled = not verified(aid)
+        set_verified(aid, enabled)
+
+        bot.send_message(
+            ADMIN_ID,
+            (
+                f"✅ <b>{acc['id']}</b> ကို Verified လုပ်ပြီးပါပြီ။"
+                if enabled
+                else f"❌ <b>{acc['id']}</b> Verified ဖြုတ်ပြီးပါပြီ။"
+            ),
+            parse_mode="HTML",
+            reply_markup=original.admin_keyboard(),
+        )
+
+    @bot.callback_query_handler(func=lambda c: c.data == "premium_admin_alert_stats")
+    def premium_admin_alert_stats(call):
+        if call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id)
+        new_alert_users = rows(
+            "SELECT COUNT(*) AS n FROM feature_settings "
+            "WHERE new_account_alert=1"
+        )[0]["n"]
+        price_alert_users = rows(
+            "SELECT COUNT(DISTINCT user_id) AS n FROM price_alerts"
+        )[0]["n"]
+
+        bot.send_message(
+            ADMIN_ID,
+            "🔔 <b>အသိပေးချက် အချက်အလက်</b>\n\n"
+            f"🆕 အသစ်တင်အသိပေးချက် ဖွင့်ထားသူ — <b>{new_alert_users}</b> ယောက်\n"
+            f"💸 ဈေးကျအသိပေးချက် အသုံးပြုသူ — <b>{price_alert_users}</b> ယောက်",
+            parse_mode="HTML",
+            reply_markup=original.admin_keyboard(),
+        )
+
+    # ------------------------------------------------------------------
+    # Background monitor: new-account notifications + price-drop alerts.
+    # No message deletion. No changes to existing account flow.
+    # ------------------------------------------------------------------
+    stop_event = threading.Event()
+
+    # Baselines: existing records are not treated as new after startup.
+    current = rows("SELECT COALESCE(MAX(id), 0) AS max_id FROM accounts")
+    last_account_id = int(current[0]["max_id"] or 0)
+
+    price_rows = rows(
+        "SELECT id, COALESCE(sale_price, price) AS p FROM accounts"
+    )
+    last_prices = {
+        int(r["id"]): int(r["p"] or 0)
+        for r in price_rows
+    }
+
+    def feature_monitor():
+        nonlocal last_account_id, last_prices
+
+        while not stop_event.wait(10):
+            try:
+                available = rows("""
+                    SELECT id, COALESCE(sale_price, price) AS p
+                    FROM accounts
+                    WHERE status='available'
+                    ORDER BY id ASC
+                """)
+
+                max_id = max((int(r["id"]) for r in available), default=last_account_id)
+
+                if max_id > last_account_id:
+                    new_rows = [
+                        r for r in available if int(r["id"]) > last_account_id
+                    ]
+
+                    alert_users = rows(
+                        "SELECT user_id FROM feature_settings "
+                        "WHERE new_account_alert=1"
+                    )
+
+                    for r in new_rows:
+                        acc = account_obj(int(r["id"]))
+                        if not acc:
+                            continue
+
+                        for user_row in alert_users:
+                            uid = int(user_row["user_id"])
+                            try:
+                                m = InlineKeyboardMarkup(row_width=1)
+                                m.add(
+                                    InlineKeyboardButton(
+                                        "⚡ အမြန်ဝယ်မယ်",
+                                        callback_data=f"premium_fast_buy_{acc['id']}",
+                                    )
+                                )
+                                bot.send_message(
+                                    uid,
+                                    "🆕 <b>Account အသစ်တင်ထားပါတယ်!</b>\n\n"
+                                    + wrapped_format_account(acc),
+                                    parse_mode="HTML",
+                                    reply_markup=m,
+                                )
+                            except Exception:
+                                pass
+
+                    last_account_id = max_id
+
+                current_prices = {
+                    int(r["id"]): int(r["p"] or 0)
+                    for r in available
+                }
+
+                for aid, new_price in current_prices.items():
+                    old_price = last_prices.get(aid, new_price)
+                    if new_price < old_price:
+                        alert_rows = rows(
+                            "SELECT user_id, last_price FROM price_alerts "
+                            "WHERE account_id=?",
+                            (aid,),
+                        )
+                        acc = account_obj(aid)
+                        if not acc:
+                            continue
+
+                        for alert_row in alert_rows:
+                            uid = int(alert_row["user_id"])
+                            old_alert_price = int(alert_row["last_price"] or 0)
+
+                            if new_price < old_alert_price:
+                                try:
+                                    m = InlineKeyboardMarkup(row_width=1)
+                                    m.add(
+                                        InlineKeyboardButton(
+                                            "⚡ အမြန်ဝယ်မယ်",
+                                            callback_data=f"premium_fast_buy_{acc['id']}",
+                                        )
+                                    )
+                                    bot.send_message(
+                                        uid,
+                                        "🔔 <b>ဈေးကျသွားပါပြီ!</b>\n\n"
+                                        + wrapped_format_account(acc)
+                                        + f"\n\n💸 ယခုဈေး — <b>{new_price:,} MMK</b>",
+                                        parse_mode="HTML",
+                                        reply_markup=m,
+                                    )
+
+                                    with db_lock:
+                                        with closing(db_connect()) as conn:
+                                            conn.execute(
+                                                "UPDATE price_alerts "
+                                                "SET last_price=? "
+                                                "WHERE user_id=? AND account_id=?",
+                                                (new_price, uid, aid),
+                                            )
+                                            conn.commit()
+                                except Exception:
+                                    pass
+
+                last_prices = current_prices
+            except Exception:
+                # Background notifications must never take down the bot.
+                pass
+
+    threading.Thread(
+        target=feature_monitor,
+        name="premium-feature-monitor",
+        daemon=True,
+    ).start()
+
+    # Ensure startup migrations are harmless and existing records stay intact.
+    return {
+        "feature_more_callback": FEATURE_MORE,
+        "my_account_callback": MY_ACCOUNT,
+        "tables_ready": True,
+    }
