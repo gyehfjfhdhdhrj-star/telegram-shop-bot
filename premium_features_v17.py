@@ -1,5 +1,5 @@
 """
-MLBB MARKET - PREMIUM FEATURES ADDON v8
+MLBB MARKET - PREMIUM FEATURES ADDON v17
 =======================================
 This file is intentionally separate from:
     main.py
@@ -45,22 +45,16 @@ _INSTALLED = False
 
 
 def _reply_keyboard_markup(user_id, admin=False):
-    """Bottom Reply Keyboard: one half of the main navigation."""
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2, selective=False)
-    kb.add(
-        KeyboardButton("🛒 အကောင့်ဝယ်မယ်"),
-        KeyboardButton("👀 အကောင့်ကြည့်မယ်"),
-        KeyboardButton("💰 အကောင့်ရောင်းမယ်"),
-        KeyboardButton("💸 လျော့စျေးအကောင့်များ"),
-    )
-    # Keep admin-only controls out of the general reply keyboard.
+    """Bottom Reply Keyboard: exactly four primary actions."""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False, row_width=2)
+    kb.row(KeyboardButton("🛒 အကောင့်ဝယ်မယ်"), KeyboardButton("👀 အကောင့်ကြည့်မယ်"))
+    kb.row(KeyboardButton("💰 အကောင့်ရောင်းမယ်"), KeyboardButton("💸 လျော့စျေးအကောင့်များ"))
     return kb
 
 
 def _inline_compact_main_menu(user_id, original):
-    """The other half stays in the normal inline menu area."""
+    """Flat Inline Menu: feature buttons only, no Reply Keyboard duplicates."""
     m = InlineKeyboardMarkup(row_width=2)
-    # Inline area contains feature menus only; keyboard items are NOT duplicated here.
     m.add(
         InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
         InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
@@ -68,10 +62,7 @@ def _inline_compact_main_menu(user_id, original):
         InlineKeyboardButton("🛡️ RC လုံးဝစိတ်ချရဆုံးအကောင့်များ", callback_data="premium_verified"),
         InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
     )
-    if int(user_id) == int(original.ADMIN_ID):
-        m.add(InlineKeyboardButton("👑 ADMIN PANEL", callback_data="admin_home"))
     return m
-
 
 def _install_reply_keyboard_layer(original):
     """
@@ -116,35 +107,68 @@ def _install_reply_keyboard_layer(original):
             )
             return
 
-        # Keep existing account-photo behavior, then explicitly send info text.
         acc = accounts[0]
         photos = [p for p in (acc.get("photos") or []) if p][:15]
-        for p in photos:
-            try:
-                bot.send_photo(message.chat.id, p)
-            except Exception:
-                pass
+        text_card = original.format_account(acc)
 
-        # Use original formatter so the full existing account info is retained.
+        if photos:
+            try:
+                from telebot.types import InputMediaPhoto
+                media = []
+                for i, p in enumerate(photos):
+                    if i == 0:
+                        media.append(
+                            InputMediaPhoto(
+                                p,
+                                caption=text_card,
+                                parse_mode="HTML",
+                            )
+                        )
+                    else:
+                        media.append(InputMediaPhoto(p))
+                bot.send_media_group(message.chat.id, media)
+            except Exception:
+                try:
+                    bot.send_photo(
+                        message.chat.id,
+                        photos[0],
+                        caption=text_card,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    bot.send_message(
+                        message.chat.id,
+                        text_card,
+                        parse_mode="HTML",
+                    )
+                for p in photos[1:]:
+                    try:
+                        bot.send_photo(message.chat.id, p)
+                    except Exception:
+                        pass
+        else:
+            bot.send_message(
+                message.chat.id,
+                text_card,
+                parse_mode="HTML",
+            )
+
+        # Keep navigation controls without adding explanatory text.
         bot.send_message(
             message.chat.id,
-            original.format_account(acc),
-            parse_mode="HTML",
+            "\u200b",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("⬅️ အရင်အကောင့်", callback_data="browse_prev"),
-                    InlineKeyboardButton("နောက်အကောင့် ➡️", callback_data="browse_next"),
+                    InlineKeyboardButton("⬅️ အရင်", callback_data="premium_browse_prev"),
+                    InlineKeyboardButton("နောက် ➡️", callback_data="premium_browse_next"),
                 ],
                 [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")],
             ]),
         )
-        try:
-            original.set_state(
-                message.from_user.id,
-                {"flow": "browse", "browse_index": 0},
-            )
-        except Exception:
-            pass
+        original.set_state(
+            message.from_user.id,
+            {"flow": "browse", "browse_index": 0},
+        )
 
     def _direct_sell(message):
         # Reuse the original sell-start handler by reproducing its exact entry state.
@@ -179,28 +203,20 @@ def _install_reply_keyboard_layer(original):
                 txt = (getattr(message, "text", None) or "").strip()
 
                 if txt == "/start":
-                    # One half = ReplyKeyboard; the other half = InlineKeyboard.
                     try:
                         original.clear_state(message.from_user.id)
                         original.log_user_activity(message.from_user, "start")
                     except Exception:
                         pass
-
                     bot.send_message(
                         message.chat.id,
-                        "⌨️",
-                        reply_markup=_reply_keyboard_markup(
-                            message.from_user.id,
-                            message.from_user.id == original.ADMIN_ID,
-                        ),
+                        "⁣",
+                        reply_markup=_reply_keyboard_markup(message.from_user.id, message.from_user.id == original.ADMIN_ID),
                     )
                     bot.send_message(
                         message.chat.id,
-                        "✨ <b>Features</b>",
-                        parse_mode="HTML",
-                        reply_markup=_inline_compact_main_menu(
-                            message.from_user.id, original
-                        ),
+                        "⁣",
+                        reply_markup=_inline_compact_main_menu(message.from_user.id, original),
                     )
                     continue
 
@@ -514,13 +530,20 @@ def install(original):
     original.format_account = format_account_wrapped
 
     def quick_reply_keyboard():
-        """Keep half of the primary menu in Telegram's bottom keyboard."""
-        m = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False, row_width=2)
+        """Exactly four primary actions in Telegram bottom Reply Keyboard."""
+        m = ReplyKeyboardMarkup(
+            resize_keyboard=True,
+            one_time_keyboard=False,
+            row_width=2,
+        )
         m.row(
             KeyboardButton("🛒 အကောင့်ဝယ်မယ်"),
             KeyboardButton("👀 အကောင့်ကြည့်မယ်"),
         )
-        m.row(KeyboardButton("💰 အကောင့်ရောင်းမယ်"), KeyboardButton("💸 လျော့စျေးအကောင့်များ"))
+        m.row(
+            KeyboardButton("💰 အကောင့်ရောင်းမယ်"),
+            KeyboardButton("💸 လျော့စျေးအကောင့်များ"),
+        )
         return m
 
     def show_quick_reply(chat_id):
@@ -535,12 +558,10 @@ def install(original):
             logging.exception("Quick keyboard send failed")
 
     def main_menu_wrapped(user_id):
-        m = original._premium_v8_main_menu(user_id)
-        # Keep original buttons, add only one compact entry point.
-        if not any(getattr(btn, "callback_data", None) == "premium_my_account" for row in m.keyboard for btn in row):
-            m.add(InlineKeyboardButton("👤 ကျွန်ုပ်၏အကောင့်", callback_data="premium_my_account"))
-        if not any(getattr(btn, "callback_data", None) == "premium_more" for row in m.keyboard for btn in row):
-            m.add(InlineKeyboardButton("✨ အခြား Features", callback_data="premium_more"))
+        # Main actions live only in Reply Keyboard; inline area shows features.
+        m = _inline_compact_main_menu(user_id, original)
+        if int(user_id) == ADMIN_ID:
+            m.add(InlineKeyboardButton("👑 ADMIN PANEL", callback_data="admin_home"))
         return m
 
     def admin_menu_wrapped():
@@ -601,53 +622,36 @@ def install(original):
 
     def send_account_card(chat_id, acc, kind, index, total):
         if not acc:
-            bot.send_message(chat_id, "❌ ဒီအကောင့် မရှိတော့ပါ။", reply_markup=original.back_button())
+            bot.send_message(chat_id, "❌ ဒီအကောင့် မရှိတော့ပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]))
             return
-
         photos = [p for p in (acc.get("photos") or []) if p][:15]
         caption = f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n{format_account_wrapped(acc)}"
-
-        # Put the full account information into the first photo caption so
-        # the account + info arrive together as one Telegram media reply.
-        sent_media = False
+        prev_map={"browse":"premium_browse_prev","search":"premium_search_prev","favorites":"premium_fav_prev","new":"premium_new_prev","verified":"premium_ver_prev"}
+        next_map={"browse":"premium_browse_next","search":"premium_search_next","favorites":"premium_fav_next","new":"premium_new_next","verified":"premium_ver_next"}
+        nav=InlineKeyboardMarkup(row_width=2)
+        nav.row(InlineKeyboardButton("⬅️ အရင်", callback_data=prev_map.get(kind,"premium_browse_prev")), InlineKeyboardButton("နောက် ➡️", callback_data=next_map.get(kind,"premium_browse_next")))
+        nav.row(InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"), InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"))
+        nav.row(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးပါ", callback_data=f"premium_price_alert_{acc['db_id']}"))
+        nav.row(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
         if photos:
             try:
                 from telebot.types import InputMediaPhoto
-                if len(photos) == 1:
-                    bot.send_photo(chat_id, photos[0], caption=caption, parse_mode="HTML")
-                else:
-                    media = [InputMediaPhoto(photos[0], caption=caption, parse_mode="HTML")]
-                    media.extend(InputMediaPhoto(p) for p in photos[1:])
-                    bot.send_media_group(chat_id, media)
-                sent_media = True
+                media=[InputMediaPhoto(p, caption=caption, parse_mode="HTML") if i==0 else InputMediaPhoto(p) for i,p in enumerate(photos)]
+                bot.send_media_group(chat_id, media)
+                # Media groups cannot have inline keyboards. Send only the controls with no extra prose.
+                bot.send_message(chat_id, "⁣", reply_markup=nav)
+                return
             except Exception:
-                logging.exception("Account media+caption send failed for %s", acc.get("id"))
-
-        if not sent_media:
-            bot.send_message(chat_id, caption, parse_mode="HTML")
-
-        # Telegram media groups cannot carry inline keyboards, so actions are
-        # a tiny follow-up control row only; no extra informational text.
-        m = InlineKeyboardMarkup(row_width=2)
-        prev_next = {
-            "browse": ("browse_prev", "browse_next"),
-            "search": ("premium_search_prev", "premium_search_next"),
-            "favorites": ("premium_fav_prev", "premium_fav_next"),
-            "new": ("premium_new_prev", "premium_new_next"),
-            "verified": ("premium_ver_prev", "premium_ver_next"),
-        }
-        prev_cb, next_cb = prev_next.get(kind, ("browse_prev", "browse_next"))
-        m.row(
-            InlineKeyboardButton("⬅️ အရင်", callback_data=prev_cb),
-            InlineKeyboardButton("နောက် ➡️", callback_data=next_cb),
-        )
-        m.row(
-            InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
-            InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
-        )
-        m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးပါ", callback_data=f"premium_price_alert_{acc['db_id']}"))
-        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
-        bot.send_message(chat_id, "👇", reply_markup=m)
+                logging.exception("Account media group failed: %s", acc.get("id"))
+            try:
+                bot.send_photo(chat_id, photos[0], caption=caption, parse_mode="HTML", reply_markup=nav)
+                for p in photos[1:]:
+                    try: bot.send_photo(chat_id,p)
+                    except Exception: pass
+                return
+            except Exception:
+                logging.exception("Account photo+caption fallback failed: %s", acc.get("id"))
+        bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=nav)
 
     # ------------------------------------------------------------
     # State helpers
@@ -676,7 +680,7 @@ def install(original):
         state = original.get_state(call.from_user.id)
         ids = state.get("premium_ids") or []
         if not ids:
-            bot.send_message(call.message.chat.id, "❌ ကြည့်ရန်အကောင့် မရှိသေးပါ။", reply_markup=buyer_features_menu())
+            bot.send_message(call.message.chat.id, "❌ ကြည့်ရန်အကောင့် မရှိသေးပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]))
             return
         idx = (int(state.get("premium_index", 0)) + int(direction)) % len(ids)
         state["premium_index"] = idx
@@ -696,11 +700,25 @@ def install(original):
     def handle_callback(call):
         data = call.data or ""
         if data == "home":
-            # Let original home handler run, then explicitly keep the bottom keyboard visible.
-            return False
+            bot.answer_callback_query(call.id)
+            try:
+                original.clear_state(call.from_user.id)
+            except Exception:
+                pass
+            bot.send_message(
+                call.message.chat.id,
+                "⁣",
+                reply_markup=_inline_compact_main_menu(call.from_user.id, original),
+            )
+            return True
+
         if data == "premium_more":
             bot.answer_callback_query(call.id)
-            bot.send_message(call.message.chat.id, "✨ <b>အသုံးဝင်တဲ့ Features</b>\n\nလိုချင်တာကို ရွေးပါ။", parse_mode="HTML", reply_markup=buyer_features_menu())
+            bot.send_message(
+                call.message.chat.id,
+                "⁣",
+                reply_markup=_inline_compact_main_menu(call.from_user.id, original),
+            )
             return True
 
         if data == "premium_my_account":
@@ -743,7 +761,7 @@ def install(original):
             aid = int(data.replace("premium_fav_toggle_", "", 1))
             acc = account_by_number(aid)
             if not acc:
-                bot.send_message(call.message.chat.id, "❌ Account မတွေ့ပါ။", reply_markup=buyer_features_menu())
+                bot.send_message(call.message.chat.id, "❌ Account မတွေ့ပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]))
             else:
                 added = toggle_favorite(call.from_user.id, aid)
                 bot.send_message(
@@ -795,7 +813,7 @@ def install(original):
             aid = int(data.replace("premium_price_alert_", "", 1))
             enabled = toggle_price_alert(call.from_user.id, aid)
             if enabled is None:
-                bot.send_message(call.message.chat.id, "❌ Account မတွေ့ပါ။", reply_markup=buyer_features_menu())
+                bot.send_message(call.message.chat.id, "❌ Account မတွေ့ပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]))
             else:
                 acc = account_by_number(aid)
                 bot.send_message(
@@ -811,7 +829,7 @@ def install(original):
             aid = data.replace("premium_fast_buy_", "", 1)
             acc = account_by_text(aid)
             if not acc or acc.get("status") != "available":
-                bot.send_message(call.message.chat.id, "❌ ဒီအကောင့် လက်ရှိ ဝယ်ယူလို့မရတော့ပါ။", reply_markup=buyer_features_menu())
+                bot.send_message(call.message.chat.id, "❌ ဒီအကောင့် လက်ရှိ ဝယ်ယူလို့မရတော့ပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]))
                 return True
             deal = active_flash(acc["db_id"])
             price = deal[0] if deal else int(acc.get("effective_price") or acc["price"])
@@ -905,7 +923,7 @@ def install(original):
             acc = account_by_text(aid)
             deal = active_flash(acc["db_id"]) if acc else None
             if not acc or not deal:
-                bot.send_message(call.message.chat.id, "❌ Flash Deal သက်တမ်းကုန်သွားပါပြီ။", reply_markup=buyer_features_menu())
+                bot.send_message(call.message.chat.id, "❌ Flash Deal သက်တမ်းကုန်သွားပါပြီ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]))
                 return True
             price = deal[0]
             m = InlineKeyboardMarkup(row_width=1)
@@ -1069,7 +1087,7 @@ def install(original):
         ids = [a["id"] for _, a in scored]
         original.clear_state(message.from_user.id)
         if not ids:
-            bot.send_message(message.chat.id, "❌ အနီးစပ်ဆုံး Account မတွေ့သေးပါ။", reply_markup=buyer_features_menu())
+            bot.send_message(message.chat.id, "❌ အနီးစပ်ဆုံး Account မတွေ့သေးပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]))
             return
         show_list(message.chat.id, message.from_user.id, ids, "search")
 
