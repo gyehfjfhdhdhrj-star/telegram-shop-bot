@@ -43,6 +43,190 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 _INSTALLED = False
 
 
+
+def _reply_keyboard_markup(user_id, admin=False):
+    """Bottom Reply Keyboard: one half of the main navigation."""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2, selective=False)
+    kb.add(
+        KeyboardButton("🛒 အကောင့်ဝယ်မယ်"),
+        KeyboardButton("👀 အကောင့်ကြည့်မယ်"),
+        KeyboardButton("💰 အကောင့်ရောင်းမယ်"),
+    )
+    # Keep admin-only controls out of the general reply keyboard.
+    return kb
+
+
+def _inline_compact_main_menu(user_id, original):
+    """The other half stays in the normal inline menu area."""
+    m = InlineKeyboardMarkup(row_width=2)
+    m.add(
+        InlineKeyboardButton("💸 လျော့စျေးအကောင့်များ", callback_data="discount_menu"),
+        InlineKeyboardButton("👤 ကျွန်ုပ်၏အကောင့်", callback_data="my_account"),
+        InlineKeyboardButton("✨ အခြား Features", callback_data="premium_more"),
+        InlineKeyboardButton("💡 Tips", callback_data="tips_menu"),
+    )
+    if int(user_id) == int(original.ADMIN_ID):
+        m.add(InlineKeyboardButton("👑 ADMIN PANEL", callback_data="admin_home"))
+    return m
+
+
+def _install_reply_keyboard_layer(original):
+    """
+    Intercept /start + only the three bottom-keyboard menu labels.
+    This leaves every other original text/message handler untouched.
+    """
+    bot = original.bot
+
+    # Install bottom Reply Keyboard + normal inline menu split.
+    _install_reply_keyboard_layer(original)
+
+    # The original Flask webhook eventually calls bot.process_new_updates().
+    previous = bot.process_new_updates
+    if hasattr(bot, "_reply_keyboard_v1_previous_process"):
+        return
+    bot._reply_keyboard_v1_previous_process = previous
+
+    def _direct_buy(message):
+        try:
+            original.clear_state(message.from_user.id)
+            original.log_user_activity(message.from_user, "buy_menu")
+        except Exception:
+            pass
+        bot.send_message(
+            message.chat.id,
+            "🛒 <b>အကောင့်ဝယ်မယ်</b>\n\n"
+            "လိုချင်တဲ့ Skin နာမည်နဲ့ Budget ကို တစ်ကြောင်းတည်း ရိုက်ပို့ပါ။\n\n"
+            "ဥပမာ — <code>Gusion | 200000</code>\n"
+            "သို့မဟုတ် <code>Any | 300000</code>",
+            parse_mode="HTML",
+            reply_markup=original.back_button(),
+        )
+        try:
+            original.set_state(message.from_user.id, {"flow": "buy_query"})
+        except Exception:
+            pass
+
+    def _direct_browse(message):
+        accounts = original.get_available_accounts()
+        if not accounts:
+            bot.send_message(
+                message.chat.id,
+                "❌ လောလောဆယ် ပြသရန် အကောင့် မရှိသေးပါ။",
+                reply_markup=original.back_button(),
+            )
+            return
+
+        # Keep existing account-photo behavior, then explicitly send info text.
+        acc = accounts[0]
+        photos = [p for p in (acc.get("photos") or []) if p][:15]
+        for p in photos:
+            try:
+                bot.send_photo(message.chat.id, p)
+            except Exception:
+                pass
+
+        # Use original formatter so the full existing account info is retained.
+        bot.send_message(
+            message.chat.id,
+            original.format_account(acc),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("⬅️ အရင်အကောင့်", callback_data="browse_prev"),
+                    InlineKeyboardButton("နောက်အကောင့် ➡️", callback_data="browse_next"),
+                ],
+                [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")],
+            ]),
+        )
+        try:
+            original.set_state(
+                message.from_user.id,
+                {"flow": "browse", "browse_index": 0},
+            )
+        except Exception:
+            pass
+
+    def _direct_sell(message):
+        # Reuse the original sell-start handler by reproducing its exact entry state.
+        try:
+            original.clear_state(message.from_user.id)
+            original.set_state(
+                message.from_user.id,
+                {
+                    "flow": "sell_photos",
+                    "photos": [],
+                    "photo_prompt_sent": False,
+                },
+            )
+            original.log_user_activity(message.from_user, "sell_start")
+        except Exception:
+            pass
+
+        bot.send_message(
+            message.chat.id,
+            "💰 <b>အကောင့်ရောင်းမယ်</b>\n\n"
+            "📸 Account ပုံ <b>အများဆုံး 15 ပုံ</b> ကို <b>တစ်ခါတည်း Album</b> အနေနဲ့ ပို့ပါ။\n\n"
+            "ပုံအားလုံးရောက်ပြီးမှ Bot က လိုအပ်တာတွေ တစ်ဆင့်ချင်း မေးပါမယ်။",
+            parse_mode="HTML",
+            reply_markup=original.back_button(),
+        )
+
+    def intercepted(updates):
+        remaining = []
+        for update in updates or []:
+            message = getattr(update, "message", None)
+            if message is not None:
+                txt = (getattr(message, "text", None) or "").strip()
+
+                if txt == "/start":
+                    # One half = ReplyKeyboard; the other half = InlineKeyboard.
+                    try:
+                        original.clear_state(message.from_user.id)
+                        original.log_user_activity(message.from_user, "start")
+                    except Exception:
+                        pass
+
+                    bot.send_message(
+                        message.chat.id,
+                        "👋 မင်္ဂလာပါ 🎮 <b>MLBB MARKET</b> မှ ကြိုဆိုပါတယ်။\n\n"
+                        "အောက်က Menu ကနေ လိုချင်တာကို ရွေးနိုင်ပါတယ်။",
+                        parse_mode="HTML",
+                        reply_markup=_reply_keyboard_markup(
+                            message.from_user.id,
+                            message.from_user.id == original.ADMIN_ID,
+                        ),
+                    )
+                    bot.send_message(
+                        message.chat.id,
+                        "✨ <b>အဓိက Menu</b>",
+                        parse_mode="HTML",
+                        reply_markup=_inline_compact_main_menu(
+                            message.from_user.id, original
+                        ),
+                    )
+                    continue
+
+                if txt == "🛒 အကောင့်ဝယ်မယ်":
+                    _direct_buy(message)
+                    continue
+
+                if txt == "👀 အကောင့်ကြည့်မယ်":
+                    _direct_browse(message)
+                    continue
+
+                if txt == "💰 အကောင့်ရောင်းမယ်":
+                    _direct_sell(message)
+                    continue
+
+            remaining.append(update)
+
+        if remaining:
+            return bot._reply_keyboard_v1_previous_process(remaining)
+        return None
+
+    bot.process_new_updates = intercepted
+
+
 def install(original):
     """Install the addon onto the already-loaded main.py module."""
     global _INSTALLED
