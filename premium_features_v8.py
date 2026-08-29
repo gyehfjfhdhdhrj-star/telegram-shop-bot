@@ -1,5 +1,5 @@
 """
-MLBB MARKET - PREMIUM FEATURES ADDON v4
+MLBB MARKET - PREMIUM FEATURES ADDON v8
 =======================================
 This file is intentionally separate from:
     main.py
@@ -38,7 +38,7 @@ from difflib import SequenceMatcher
 import threading
 import logging
 
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 _INSTALLED = False
 
@@ -262,17 +262,17 @@ def install(original):
     # ------------------------------------------------------------
     # Preserve original formatter and main/admin menus.
     # ------------------------------------------------------------
-    if not hasattr(original, "_premium_v4_row_to_account"):
-        original._premium_v4_row_to_account = original.row_to_account
-    if not hasattr(original, "_premium_v4_format_account"):
-        original._premium_v4_format_account = original.format_account
-    if not hasattr(original, "_premium_v4_main_menu"):
-        original._premium_v4_main_menu = original.main_menu
-    if not hasattr(original, "_premium_v4_admin_keyboard"):
-        original._premium_v4_admin_keyboard = original.admin_keyboard
+    if not hasattr(original, "_premium_v8_row_to_account"):
+        original._premium_v8_row_to_account = original.row_to_account
+    if not hasattr(original, "_premium_v8_format_account"):
+        original._premium_v8_format_account = original.format_account
+    if not hasattr(original, "_premium_v8_main_menu"):
+        original._premium_v8_main_menu = original.main_menu
+    if not hasattr(original, "_premium_v8_admin_keyboard"):
+        original._premium_v8_admin_keyboard = original.admin_keyboard
 
     def row_to_account_wrapped(row):
-        acc = original._premium_v4_row_to_account(row)
+        acc = original._premium_v8_row_to_account(row)
         try:
             acc["is_verified"] = int(row["is_verified"] or 0) if "is_verified" in row.keys() else 0
         except Exception:
@@ -286,14 +286,14 @@ def install(original):
         return text
 
     def format_account_wrapped(acc):
-        lines = original._premium_v4_format_account(acc).split("\n")
+        lines = original._premium_v8_format_account(acc).split("\n")
 
         skin = short_skins(acc.get("skins"))
         if skin and not any("Skin အတိုချုပ်" in x for x in lines):
             lines.insert(min(3, len(lines)), f"🎨 <b>Skin အတိုချုပ် — {skin}</b>")
 
-        if acc.get("is_verified") and not any("ADMIN စစ်ဆေးပြီး" in x for x in lines):
-            lines.insert(min(4, len(lines)), "✅ <b>ADMIN စစ်ဆေးပြီး</b>")
+        if not any("Admin စစ်ဆေးပြီး" in x for x in lines):
+            lines.insert(min(4, len(lines)), "✅ <b>Admin စစ်ဆေးပြီး</b>")
 
         flash = active_flash(acc.get("db_id", 0)) if acc.get("db_id") else None
         if flash:
@@ -307,8 +307,29 @@ def install(original):
     original.row_to_account = row_to_account_wrapped
     original.format_account = format_account_wrapped
 
+    def quick_reply_keyboard():
+        """Keep half of the primary menu in Telegram's bottom keyboard."""
+        m = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False, row_width=2)
+        m.row(
+            KeyboardButton("🛒 အကောင့်ဝယ်မယ်"),
+            KeyboardButton("👀 အကောင့်ကြည့်မယ်"),
+        )
+        m.row(KeyboardButton("💰 အကောင့်ရောင်းမယ်"))
+        return m
+
+    def show_quick_reply(chat_id):
+        try:
+            bot.send_message(
+                chat_id,
+                "⌨️ <b>အမြန် Menu</b>",
+                parse_mode="HTML",
+                reply_markup=quick_reply_keyboard(),
+            )
+        except Exception:
+            logging.exception("Quick keyboard send failed")
+
     def main_menu_wrapped(user_id):
-        m = original._premium_v4_main_menu(user_id)
+        m = original._premium_v8_main_menu(user_id)
         # Keep original buttons, add only one compact entry point.
         if not any(getattr(btn, "callback_data", None) == "premium_my_account" for row in m.keyboard for btn in row):
             m.add(InlineKeyboardButton("👤 ကျွန်ုပ်၏အကောင့်", callback_data="premium_my_account"))
@@ -317,7 +338,7 @@ def install(original):
         return m
 
     def admin_menu_wrapped():
-        m = original._premium_v4_admin_keyboard()
+        m = original._premium_v8_admin_keyboard()
         if not any(getattr(btn, "callback_data", None) == "premium_admin_tools" for row in m.keyboard for btn in row):
             m.add(InlineKeyboardButton("✨ Premium Features စီမံမယ်", callback_data="premium_admin_tools"))
         return m
@@ -334,7 +355,7 @@ def install(original):
             InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
             InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
             InlineKeyboardButton("🔎 အဆင့်မြင့်ရှာဖွေမယ်", callback_data="premium_advanced_search"),
-            InlineKeyboardButton("✅ စစ်ဆေးပြီးအကောင့်များ", callback_data="premium_verified"),
+            InlineKeyboardButton("🛡️ RC လုံးဝစိတ်ချရဆုံးအကောင့်များ", callback_data="premium_verified"),
             InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
             InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"),
         )
@@ -368,7 +389,7 @@ def install(original):
             InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
             InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
         )
-        m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးမယ်", callback_data=f"premium_price_alert_{acc['db_id']}"))
+        m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးပါ", callback_data=f"premium_price_alert_{acc['db_id']}"))
         m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
         return m
 
@@ -377,15 +398,25 @@ def install(original):
             bot.send_message(chat_id, "❌ ဒီအကောင့် မရှိတော့ပါ။", reply_markup=original.back_button())
             return
 
-        # Photos first, but each photo is isolated so text always survives.
         photos = [p for p in (acc.get("photos") or []) if p][:15]
-        for photo in photos:
-            try:
-                bot.send_photo(chat_id, photo)
-            except Exception:
-                logging.exception("Premium photo send failed for %s", acc.get("id"))
-
         text = f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n{format_account_wrapped(acc)}"
+
+        # Group photos together when Telegram accepts the references.
+        # The text card is sent separately so it can never disappear when a
+        # media-group/photo request fails.
+        if photos:
+            try:
+                from telebot.types import InputMediaPhoto
+                media = [InputMediaPhoto(p) for p in photos]
+                bot.send_media_group(chat_id, media)
+            except Exception:
+                logging.exception("Premium media-group send failed for %s; falling back to individual photos", acc.get("id"))
+                for photo in photos:
+                    try:
+                        bot.send_photo(chat_id, photo)
+                    except Exception:
+                        logging.exception("Premium photo send failed for %s", acc.get("id"))
+
         bot.send_message(
             chat_id,
             text,
@@ -439,6 +470,9 @@ def install(original):
     # ------------------------------------------------------------
     def handle_callback(call):
         data = call.data or ""
+        if data == "home":
+            # Preserve original home behavior, then show the compact bottom keyboard.
+            return False
         if data == "premium_more":
             bot.answer_callback_query(call.id)
             bot.send_message(call.message.chat.id, "✨ <b>အသုံးဝင်တဲ့ Features</b>\n\nလိုချင်တာကို ရွေးပါ။", parse_mode="HTML", reply_markup=buyer_features_menu())
@@ -491,7 +525,7 @@ def install(original):
                     call.message.chat.id,
                     f"❤️ <b>{acc['id']}</b> ကို သိမ်းထားလိုက်ပါပြီ။" if added else f"💔 <b>{acc['id']}</b> ကို သိမ်းထားတာ ဖြုတ်လိုက်ပါပြီ။",
                     parse_mode="HTML",
-                    reply_markup=buyer_features_menu(),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]),
                 )
             return True
 
@@ -543,7 +577,7 @@ def install(original):
                     call.message.chat.id,
                     f"🔔 <b>{acc['id']}</b> ဈေးကျရင် အသိပေးပါမယ်။" if enabled else f"🔕 <b>{acc['id']}</b> ရဲ့ ဈေးကျအသိပေးချက် ပိတ်လိုက်ပါပြီ။",
                     parse_mode="HTML",
-                    reply_markup=buyer_features_menu(),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]),
                 )
             return True
 
@@ -635,7 +669,7 @@ def install(original):
                     InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
                     InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
                 )
-                m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးမယ်", callback_data=f"premium_price_alert_{acc['db_id']}"))
+                m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးပါ", callback_data=f"premium_price_alert_{acc['db_id']}"))
                 m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
                 bot.send_message(call.message.chat.id, text_card, parse_mode="HTML", reply_markup=m)
             return True
@@ -850,12 +884,71 @@ def install(original):
     # ------------------------------------------------------------
     previous_process = bot.process_new_updates
 
-    if not hasattr(bot, "_premium_v4_previous_process"):
-        bot._premium_v4_previous_process = previous_process
+    if not hasattr(bot, "_premium_v8_previous_process"):
+        bot._premium_v8_previous_process = previous_process
 
         def intercepted_process(updates):
             remaining = []
+            quick_texts = {
+                "🛒 အကောင့်ဝယ်မယ်",
+                "👀 အကောင့်ကြည့်မယ်",
+                "💰 အကောင့်ရောင်းမယ်",
+            }
             for update in updates or []:
+                message = getattr(update, "message", None)
+                if message is not None and (message.text or "") in quick_texts:
+                    text_value = (message.text or "").strip()
+                    if text_value == "🛒 အကောင့်ဝယ်မယ်":
+                        try:
+                            original.clear_state(message.from_user.id)
+                            original.bot.send_message(
+                                message.chat.id,
+                                "🛒 <b>အကောင့်ဝယ်မယ်</b>\n\n"
+                                "လိုချင်တဲ့ Skin နာမည်နဲ့ Budget ကို တစ်ကြောင်းတည်း ရိုက်ပို့ပါ။\n\n"
+                                "ဥပမာ — <code>Gusion | 200000</code>\n"
+                                "သို့မဟုတ် <code>Any | 300000</code>",
+                                parse_mode="HTML",
+                                reply_markup=InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("👀 အကောင့်အားလုံးကြည့်မယ်", callback_data="browse_0")],
+                                    [InlineKeyboardButton("💸 လျော့စျေးအကောင့်များ", callback_data="discount_menu")],
+                                    [InlineKeyboardButton("🔙 ပင်မ Menu", callback_data="home")]
+                                ])
+                            )
+                            original.set_state(message.from_user.id, {"flow": "buy_query"})
+                        except Exception:
+                            logging.exception("Quick buy keyboard failed")
+                        continue
+                    if text_value == "👀 အကောင့်ကြည့်မယ်":
+                        try:
+                            accounts = original.get_available_accounts()
+                            if not accounts:
+                                bot.send_message(message.chat.id, "❌ လောလောဆယ် အကောင့် မရှိသေးပါ။", reply_markup=original.back_button())
+                            else:
+                                original.set_state(message.from_user.id, {"flow": "browse", "browse_index": 0})
+                                send_account_card(message.chat.id, accounts[0], "browse", 0, len(accounts))
+                        except Exception:
+                            logging.exception("Quick browse keyboard failed")
+                        continue
+                    if text_value == "💰 အကောင့်ရောင်းမယ်":
+                        try:
+                            original.clear_state(message.from_user.id)
+                            original.set_state(message.from_user.id, {
+                                "flow": "sell_photos",
+                                "photos": [],
+                                "photo_prompt_sent": False,
+                            })
+                            bot.send_message(
+                                message.chat.id,
+                                "💰 <b>အကောင့်ရောင်းမယ်</b>\n\n"
+                                "📸 Account ပုံ <b>အများဆုံး 15 ပုံ</b> ကို <b>တစ်ခါတည်း Album</b> အနေနဲ့ ပို့ပါ။\n\n"
+                                "ပုံအားလုံးရောက်ပြီးမှ Bot က လိုအပ်တာတွေ တစ်ဆင့်ချင်း မေးပါမယ်။",
+                                parse_mode="HTML",
+                                reply_markup=original.back_button(),
+                            )
+                        except Exception:
+                            logging.exception("Quick sell keyboard failed")
+                        continue
+
                 call = getattr(update, "callback_query", None)
                 if call is not None:
                     try:
@@ -870,7 +963,7 @@ def install(original):
                         continue
                 remaining.append(update)
             if remaining:
-                return bot._premium_v4_previous_process(remaining)
+                return bot._premium_v8_previous_process(remaining)
             return None
 
         bot.process_new_updates = intercepted_process
@@ -951,8 +1044,8 @@ def install(original):
     except Exception:
         logging.exception("Premium feature schema initialization failed before monitor start")
 
-    threading.Thread(target=monitor, name="premium-feature-monitor-v4", daemon=True).start()
+    threading.Thread(target=monitor, name="premium-feature-monitor-v8", daemon=True).start()
 
     # Expose only for diagnostics; not required by main.py.
-    original.PREMIUM_FEATURES_V4_READY = True
-    logging.info("PREMIUM_FEATURES_V4_READY")
+    original.PREMIUM_FEATURES_V8_READY = True
+    logging.info("PREMIUM_FEATURES_V8_READY")
