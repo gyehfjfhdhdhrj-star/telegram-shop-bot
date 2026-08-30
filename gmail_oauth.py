@@ -164,16 +164,29 @@ def _make_state(admin_id: int) -> str:
     return f"{encoded}.{_signature(encoded)}"
 
 
-def _verify_state(state: str, expected_admin_id: int) -> bool:
+def _verify_state_detailed(
+    state: str,
+    expected_admin_id: int,
+) -> tuple[bool, str]:
+    if not state:
+        return False, "missing"
+
+    if not STATE_SECRET:
+        return False, "secret_missing"
+
     try:
-        encoded, supplied_signature = state.split(".", 1)
+        parts = state.split(".", 1)
+        if len(parts) != 2:
+            return False, "format"
+
+        encoded, supplied_signature = parts
         expected_signature = _signature(encoded)
 
         if not hmac.compare_digest(
             supplied_signature,
             expected_signature,
         ):
-            return False
+            return False, "signature"
 
         payload = json.loads(
             _b64d(encoded).decode("utf-8")
@@ -183,12 +196,33 @@ def _verify_state(state: str, expected_admin_id: int) -> bool:
         admin_id = int(payload.get("admin_id", 0))
 
         if admin_id != int(expected_admin_id):
-            return False
+            return False, "admin"
 
         age = int(time.time()) - issued_at
-        return 0 <= age <= STATE_TTL_SECONDS
-    except Exception:
-        return False
+        if age < 0:
+            return False, "clock"
+
+        if age > STATE_TTL_SECONDS:
+            return False, "expired"
+
+        return True, "ok"
+
+    except Exception as exc:
+        logging.exception(
+            "GMAIL_OAUTH_STATE_VERIFY_EXCEPTION"
+        )
+        return False, f"exception:{type(exc).__name__}"
+
+
+def _verify_state(
+    state: str,
+    expected_admin_id: int,
+) -> bool:
+    ok, _ = _verify_state_detailed(
+        state,
+        expected_admin_id,
+    )
+    return ok
 
 
 def create_authorization_url(
@@ -464,15 +498,20 @@ def oauth_callback():
         )
         return "Missing OAuth state.", 400
 
-    if not _verify_state(
+    state_ok, state_reason = _verify_state_detailed(
         state,
         configured_admin,
-    ):
+    )
+
+    if not state_ok:
         logging.error(
-            "GMAIL_OAUTH_STATE_INVALID"
+            "GMAIL_OAUTH_STATE_INVALID reason=%s state_len=%s",
+            state_reason,
+            len(state),
         )
         return (
-            "Invalid or expired OAuth state. "
+            "Invalid OAuth state. "
+            f"Reason: {state_reason}. "
             "Please start Gmail connection again from Telegram.",
             400,
         )
