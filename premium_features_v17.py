@@ -58,8 +58,7 @@ def _inline_compact_main_menu(user_id, original):
     m.add(
         InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
         InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
-        InlineKeyboardButton("🔎 အဆင့်မြင့်ရှာဖွေမယ်", callback_data="premium_advanced_search"),
-        InlineKeyboardButton("🛡️ RC လုံးဝစိတ်ချရဆုံးအကောင့်များ", callback_data="premium_verified"),
+        InlineKeyboardButton("🔎 ဂိမ်းအကောင့်ရှာမယ်", callback_data="premium_advanced_search"),
         InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
     )
     return m
@@ -159,8 +158,8 @@ def _install_reply_keyboard_layer(original):
             "\u200b",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("⬅️ အရင်", callback_data="premium_browse_prev"),
-                    InlineKeyboardButton("နောက် ➡️", callback_data="premium_browse_next"),
+                    InlineKeyboardButton("⬅️ အရင်Account", callback_data="premium_browse_prev"),
+                    InlineKeyboardButton("နောက် Account ➡️", callback_data="premium_browse_next"),
                 ],
                 [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")],
             ]),
@@ -509,20 +508,17 @@ def install(original):
 
     def format_account_wrapped(acc):
         lines = original._premium_v8_format_account(acc).split("\n")
+        lines = [line.replace("GAMING SHOP", "Aung Gyi GameShop") for line in lines]
 
         skin = short_skins(acc.get("skins"))
-        if skin and not any("Skin အတိုချုပ်" in x for x in lines):
-            lines.insert(min(3, len(lines)), f"🎨 <b>Skin အတိုချုပ် — {skin}</b>")
+        if skin and not any("ပါတဲ့ Skinတွေ" in x for x in lines):
+            lines.insert(
+                min(3, len(lines)),
+                f"🎨 <b>ပါတဲ့ Skinတွေ — {skin}</b>\n📝 <i>Skin အချက်အလက်တွေကို ဒီနေရာမှာ ပြထားပါတယ်။</i>",
+            )
 
         if not any("Admin စစ်ဆေးပြီး" in x for x in lines):
             lines.insert(min(4, len(lines)), "✅ <b>Admin စစ်ဆေးပြီး</b>")
-
-        flash = active_flash(acc.get("db_id", 0)) if acc.get("db_id") else None
-        if flash:
-            deal_price, ends = flash
-            seconds = max(0, int((ends - datetime.now(timezone.utc)).total_seconds()))
-            mins, secs = divmod(seconds, 60)
-            lines.append(f"🔥 <b>FLASH DEAL — {deal_price:,} MMK</b>  ⏰ {mins:02d}:{secs:02d}")
 
         return "\n".join(lines)
 
@@ -581,8 +577,7 @@ def install(original):
         m.add(
             InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
             InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
-            InlineKeyboardButton("🔎 အဆင့်မြင့်ရှာဖွေမယ်", callback_data="premium_advanced_search"),
-            InlineKeyboardButton("🛡️ RC လုံးဝစိတ်ချရဆုံးအကောင့်များ", callback_data="premium_verified"),
+            InlineKeyboardButton("🔎 ဂိမ်းအကောင့်ရှာမယ်", callback_data="premium_advanced_search"),
             InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
             InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"),
         )
@@ -609,14 +604,13 @@ def install(original):
         prev_cb, next_cb = prev_next.get(kind, prev_next["browse"])
         m = InlineKeyboardMarkup(row_width=2)
         m.row(
-            InlineKeyboardButton("⬅️ အရင်အကောင့်", callback_data=prev_cb),
-            InlineKeyboardButton("နောက်အကောင့် ➡️", callback_data=next_cb),
+            InlineKeyboardButton("⬅️ အရင်Account", callback_data=prev_cb),
+            InlineKeyboardButton("နောက် Account ➡️", callback_data=next_cb),
         )
         m.row(
             InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
             InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
         )
-        m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးပါ", callback_data=f"premium_price_alert_{acc['db_id']}"))
         m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
         return m
 
@@ -629,9 +623,8 @@ def install(original):
         prev_map={"browse":"premium_browse_prev","search":"premium_search_prev","favorites":"premium_fav_prev","new":"premium_new_prev","verified":"premium_ver_prev"}
         next_map={"browse":"premium_browse_next","search":"premium_search_next","favorites":"premium_fav_next","new":"premium_new_next","verified":"premium_ver_next"}
         nav=InlineKeyboardMarkup(row_width=2)
-        nav.row(InlineKeyboardButton("⬅️ အရင်", callback_data=prev_map.get(kind,"premium_browse_prev")), InlineKeyboardButton("နောက် ➡️", callback_data=next_map.get(kind,"premium_browse_next")))
+        nav.row(InlineKeyboardButton("⬅️ အရင်Account", callback_data=prev_map.get(kind,"premium_browse_prev")), InlineKeyboardButton("နောက် Account ➡️", callback_data=next_map.get(kind,"premium_browse_next")))
         nav.row(InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"), InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"))
-        nav.row(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးပါ", callback_data=f"premium_price_alert_{acc['db_id']}"))
         nav.row(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
         if photos:
             try:
@@ -850,10 +843,12 @@ def install(original):
             original.set_state(call.from_user.id, {"flow": "premium_advanced_search"})
             msg = bot.send_message(
                 call.message.chat.id,
-                "🔎 <b>အဆင့်မြင့်ရှာဖွေမယ်</b>\n\n"
-                "ဒီလိုရေးပါ — <code>Skin | အနည်းဆုံးဈေး | အများဆုံးဈေး</code>\n\n"
-                "ဥပမာ — <code>Collector | 100000 | 200000</code>\n"
-                "Skin မလိုချင်ရင် — <code>Any | 0 | 150000</code>",
+                "🔎 <b>ဂိမ်းအကောင့်ရှာမယ်</b>\n\n"
+                "ကိုယ်လိုချင်တဲ့ဂိမ်းအကောင့်ကိုရှာမယ်ဆိုရင်\n"
+                "ဒီလိုရိုက်ရှာပေးပါ —\n"
+                "သင်လိုချင်တဲ့ Skin / သုံးမယ့်အနည်းဆုံးဈေး / သုံးမယ့်အများဆုံးဈေး\n\n"
+                "ဥပမာ — <code>Gs Collector / 50000 / 70000</code>\n"
+                "ကိုယ်သုံးမယ့် Buget နဲ့ ဘယ်လိုအကောင့်မျိုးရနိုင်မလဲသိချင်ရင် — <code>Any / 0 / 150000</code>",
                 parse_mode="HTML",
                 reply_markup=original.back_button(),
             )
@@ -887,7 +882,13 @@ def install(original):
 
             for acc, deal_price, ends, original_price in items:
                 remain = max(0, int((ends - datetime.now(timezone.utc)).total_seconds()))
-                mins, secs = divmod(remain, 60)
+                total_minutes = (remain + 59) // 60
+                if total_minutes >= 60:
+                    hours, rem_minutes = divmod(total_minutes, 60)
+                    expiry_text = f"{hours} နာရီ" if rem_minutes == 0 else f"{hours} နာရီ {rem_minutes} မိနစ်"
+                else:
+                    expiry_text = f"{total_minutes} မိနစ်"
+
                 discount_amount = max(0, original_price - deal_price)
                 discount_pct = int(round(discount_amount * 100 / original_price)) if original_price > 0 else 0
                 text_card = (
@@ -896,7 +897,7 @@ def install(original):
                     f"💰 အရင်ဈေး — <s>{original_price:,} MMK</s>\n"
                     f"🔥 ယခုဈေး — <b>{deal_price:,} MMK</b>\n"
                     f"🎟️ အကောင့်လျော့စျေးကူပွန် — <b>-{discount_amount:,} MMK ({discount_pct}%)</b>\n"
-                    f"⏰ ကုန်ဆုံးချိန် — <b>{mins:02d}:{secs:02d}</b>\n\n"
+                    f"⏰ ကုန်ဆုံးချိန် — <b>{expiry_text}</b>\n\n"
                     + format_account_wrapped(acc)
                 )
 
@@ -912,7 +913,6 @@ def install(original):
                     InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
                     InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
                 )
-                m.add(InlineKeyboardButton("🔔 ဈေးကျရင် အသိပေးပါ", callback_data=f"premium_price_alert_{acc['db_id']}"))
                 m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
                 bot.send_message(call.message.chat.id, text_card, parse_mode="HTML", reply_markup=m)
             return True
@@ -1045,9 +1045,9 @@ def install(original):
 
     def advanced_search_receive(message):
         raw = (message.text or "").strip()
-        parts = [p.strip() for p in raw.split("|", 2)]
+        parts = [p.strip() for p in raw.split("/", 2)]
         if len(parts) != 3:
-            msg = bot.send_message(message.chat.id, "❌ Format မမှန်ပါ။\n<code>Collector | 100000 | 200000</code>", parse_mode="HTML", reply_markup=original.back_button())
+            msg = bot.send_message(message.chat.id, "❌ Format မမှန်ပါ။\n<code>Gs Collector / 50000 / 70000</code>", parse_mode="HTML", reply_markup=original.back_button())
             bot.register_next_step_handler(msg, advanced_search_receive)
             return
 
