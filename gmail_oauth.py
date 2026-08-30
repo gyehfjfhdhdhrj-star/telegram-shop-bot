@@ -1,48 +1,79 @@
 """
-MLBB MARKET - Gmail OAuth 2.0 Connector (SAFE)
+MLBB MARKET - Gmail OAuth 2.0 Connector (stable signed-state)
 
-Purpose:
-- Connect administrator-owned Gmail mailboxes through Google's OAuth 2.0 flow.
-- Store OAuth tokens in a local SQLite table so the existing Supabase DB backup
-  mechanism can persist them.
-- Check mailbox/message metadata and detect incoming mail without exposing or
-  forwarding authentication codes.
+Separate Gmail connector for the existing Telegram bot.
+Does not modify main.py or supabase_launcher.py.
 
-This module intentionally does NOT extract, store, or forward OTP/verification
-codes.
+Safe scope:
+- Administrator-authorized Gmail OAuth connection
+- Gmail mailbox metadata
+- Recent message metadata (From/To/Subject/Date)
+
+This module does not extract, store, or forward OTP / verification codes.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import logging
 import os
 import secrets
 import sqlite3
-import threading
+import time
+import uuid
 from contextlib import closing
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from flask import Blueprint, redirect, request, session
+from flask import Blueprint, redirect, request
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-CLIENT_SECRET_FILE = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_FILE", "client_secret.json")
-CALLBACK_PATH = os.getenv("GOOGLE_OAUTH_CALLBACK_PATH", "/gmail/oauth/callback")
-DB_PATH = os.getenv("DB_PATH", "/var/data/shop.db")
-TOKEN_DIR = Path(os.getenv("GOOGLE_OAUTH_TOKEN_DIR", "/var/data/gmail_tokens"))
+CLIENT_SECRET_FILE = os.getenv(
+    "GOOGLE_OAUTH_CLIENT_SECRET_FILE",
+    "/etc/secrets/client_secret.json",
+).strip()
+CALLBACK_PATH = (
+    os.getenv(
+        "GOOGLE_OAUTH_CALLBACK_PATH",
+        "/gmail/oauth/callback",
+    ).strip()
+    or "/gmail/oauth/callback"
+)
+DB_PATH = (
+    os.getenv("DB_PATH", "/tmp/shop.db").strip()
+    or "/tmp/shop.db"
+)
+TOKEN_DIR = Path(
+    os.getenv(
+        "GOOGLE_OAUTH_TOKEN_DIR",
+        "/tmp/gmail_tokens",
+    ).strip()
+    or "/tmp/gmail_tokens"
+)
 
-_lock = threading.Lock()
-_state = {}
+# A signed, self-contained state avoids relying on in-memory state or a
+# state table that can be affected by the DB backup/restore cycle.
+STATE_SECRET = (
+    os.getenv("GOOGLE_OAUTH_STATE_SECRET", "").strip()
+    or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+)
+STATE_TTL_SECONDS = 600
 
 bp = Blueprint("gmail_oauth", __name__)
 
 
 def _connect_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -50,16 +81,8 @@ def _connect_db():
 def init_db():
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-    with _lock, closing(_connect_db()) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gmail_oauth_states (
-                state TEXT PRIMARY KEY,
-                owner_user_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
+
+    with closing(_connect_db()) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS gmail_mailboxes (
@@ -81,39 +104,101 @@ def _redirect_uri(public_url: str) -> str:
 
 
 def _flow(public_url: str, state: Optional[str] = None) -> Flow:
+    client_path = Path(CLIENT_SECRET_FILE)
+    if not client_path.is_file():
+        raise FileNotFoundError(
+            "Google OAuth client secret file not found: "
+            f"{CLIENT_SECRET_FILE}"
+        )
+
     flow = Flow.from_client_secrets_file(
-        CLIENT_SECRET_FILE,
+        str(client_path),
         scopes=SCOPES,
         redirect_uri=_redirect_uri(public_url),
     )
+
     if state:
         flow.state = state
+
     return flow
 
 
-def create_authorization_url(public_url: str, owner_user_id: int) -> str:
-    init_db()
-    state = secrets.token_urlsafe(32)
-    created_at = datetime.now(timezone.utc).isoformat()
+def _b64e(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
-    with _lock, closing(_connect_db()) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO gmail_oauth_states(
-                state,
-                owner_user_id,
-                created_at
-            )
-            VALUES (?, ?, ?)
-            """,
-            (
-                state,
-                int(owner_user_id),
-                created_at,
-            ),
+
+def _b64d(value: str) -> bytes:
+    return base64.urlsafe_b64decode(
+        value + ("=" * (-len(value) % 4))
+    )
+
+
+def _signature(payload: str) -> str:
+    if not STATE_SECRET:
+        raise RuntimeError(
+            "GOOGLE_OAUTH_STATE_SECRET or TELEGRAM_BOT_TOKEN is missing"
         )
-        conn.commit()
+    return _b64e(
+        hmac.new(
+            STATE_SECRET.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    )
+
+
+def _make_state(admin_id: int) -> str:
+    payload = {
+        "v": 1,
+        "admin_id": int(admin_id),
+        "iat": int(time.time()),
+        "nonce": uuid.uuid4().hex,
+    }
+    encoded = _b64e(
+        json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    return f"{encoded}.{_signature(encoded)}"
+
+
+def _verify_state(state: str, expected_admin_id: int) -> bool:
+    try:
+        encoded, supplied_signature = state.split(".", 1)
+        expected_signature = _signature(encoded)
+
+        if not hmac.compare_digest(
+            supplied_signature,
+            expected_signature,
+        ):
+            return False
+
+        payload = json.loads(
+            _b64d(encoded).decode("utf-8")
+        )
+
+        issued_at = int(payload.get("iat", 0))
+        admin_id = int(payload.get("admin_id", 0))
+
+        if admin_id != int(expected_admin_id):
+            return False
+
+        age = int(time.time()) - issued_at
+        return 0 <= age <= STATE_TTL_SECONDS
+    except Exception:
+        return False
+
+
+def create_authorization_url(
+    public_url: str,
+    owner_user_id: int,
+) -> str:
+    init_db()
+    state = _make_state(owner_user_id)
     flow = _flow(public_url, state=state)
+
     authorization_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
@@ -123,25 +208,44 @@ def create_authorization_url(public_url: str, owner_user_id: int) -> str:
 
 
 def _safe_token_path(email: str) -> Path:
-    safe = "".join(ch for ch in email.lower() if ch.isalnum() or ch in "._-")
+    safe = "".join(
+        ch
+        for ch in email.lower()
+        if ch.isalnum() or ch in "._-"
+    )
     return TOKEN_DIR / f"{safe}.json"
 
 
-def save_credentials(creds: Credentials, email: str):
+def save_credentials(
+    creds: Credentials,
+    email: str,
+):
+    init_db()
     path = _safe_token_path(email)
-    path.write_text(creds.to_json(), encoding="utf-8")
+
+    path.write_text(
+        creds.to_json(),
+        encoding="utf-8",
+    )
+
     try:
         os.chmod(path, 0o600)
     except OSError:
         pass
 
-    with _lock, closing(_connect_db()) as conn:
+    with closing(_connect_db()) as conn:
         conn.execute(
             """
-            INSERT INTO gmail_mailboxes(email, token_path, status, updated_at)
-            VALUES (?, ?, 'available', CURRENT_TIMESTAMP)
+            INSERT INTO gmail_mailboxes(
+                email,
+                token_path,
+                status,
+                updated_at
+            )
+            VALUES(?, ?, 'available', CURRENT_TIMESTAMP)
             ON CONFLICT(email) DO UPDATE SET
                 token_path=excluded.token_path,
+                status='available',
                 updated_at=CURRENT_TIMESTAMP
             """,
             (email, str(path)),
@@ -149,122 +253,322 @@ def save_credentials(creds: Credentials, email: str):
         conn.commit()
 
 
-def load_credentials(email: str) -> Optional[Credentials]:
+def load_credentials(
+    email: str,
+) -> Optional[Credentials]:
     init_db()
+
     with closing(_connect_db()) as conn:
         row = conn.execute(
-            "SELECT token_path FROM gmail_mailboxes WHERE email=?",
+            """
+            SELECT token_path
+            FROM gmail_mailboxes
+            WHERE email=?
+            """,
             (email,),
         ).fetchone()
+
     if not row:
         return None
+
     path = Path(row["token_path"])
-    if not path.exists():
+    if not path.is_file():
         return None
-    creds = Credentials.from_authorized_user_file(str(path), SCOPES)
+
+    creds = Credentials.from_authorized_user_file(
+        str(path),
+        SCOPES,
+    )
+
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
         save_credentials(creds, email)
+
     return creds
 
 
 def mailbox_service(email: str):
     creds = load_credentials(email)
+
     if not creds or not creds.valid:
-        raise RuntimeError(f"Gmail OAuth authorization missing/expired for {email}")
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+        raise RuntimeError(
+            "Gmail OAuth authorization missing/expired for "
+            f"{email}"
+        )
+
+    return build(
+        "gmail",
+        "v1",
+        credentials=creds,
+        cache_discovery=False,
+    )
 
 
 def mailbox_profile(email: str) -> dict:
-    service = mailbox_service(email)
-    return service.users().getProfile(userId="me").execute()
+    return (
+        mailbox_service(email)
+        .users()
+        .getProfile(userId="me")
+        .execute()
+    )
 
 
-def list_recent_messages(email: str, query: str = "", max_results: int = 10) -> list[dict]:
-    """Return message metadata only. No body/OTP extraction."""
+def list_recent_messages(
+    email: str,
+    query: str = "",
+    max_results: int = 10,
+) -> list[dict]:
     service = mailbox_service(email)
     response = (
         service.users()
         .messages()
-        .list(userId="me", q=query, maxResults=max_results)
+        .list(
+            userId="me",
+            q=query,
+            maxResults=max_results,
+        )
         .execute()
     )
     return response.get("messages", [])
 
 
-def get_message_headers(email: str, message_id: str) -> dict:
-    """Return safe header metadata for auditing and sender matching."""
+def get_message_headers(
+    email: str,
+    message_id: str,
+) -> dict:
     service = mailbox_service(email)
-    msg = (
+    message = (
         service.users()
         .messages()
-        .get(userId="me", id=message_id, format="metadata",
-             metadataHeaders=["From", "To", "Subject", "Date"])
+        .get(
+            userId="me",
+            id=message_id,
+            format="metadata",
+            metadataHeaders=[
+                "From",
+                "To",
+                "Subject",
+                "Date",
+            ],
+        )
         .execute()
     )
+
     headers = {}
-    for header in msg.get("payload", {}).get("headers", []):
+    for header in (
+        message
+        .get("payload", {})
+        .get("headers", [])
+    ):
         name = header.get("name", "")
         value = header.get("value", "")
-        if name in {"From", "To", "Subject", "Date"}:
+        if name in {
+            "From",
+            "To",
+            "Subject",
+            "Date",
+        }:
             headers[name] = value
-    return {"id": message_id, "headers": headers, "labelIds": msg.get("labelIds", [])}
+
+    return {
+        "id": message_id,
+        "headers": headers,
+        "labelIds": message.get(
+            "labelIds",
+            [],
+        ),
+    }
 
 
 @bp.route("/gmail/oauth/start")
 def oauth_start():
-    # This endpoint is intended for an ADMIN-only button/link.
-    public_url = os.getenv("PUBLIC_URL", "").strip()
-    owner = int(request.args.get("admin_id", "0"))
-    if not public_url or owner <= 0:
-        return "OAuth configuration is missing.", 400
-    if owner != int(os.getenv("ADMIN_ID", "0")):
+    public_url = os.getenv(
+        "PUBLIC_URL",
+        "",
+    ).strip()
+
+    raw_admin = request.args.get(
+        "admin_id",
+        "0",
+    ).strip()
+
+    try:
+        admin_id = int(raw_admin)
+        configured_admin = int(
+            os.getenv(
+                "ADMIN_ID",
+                "0",
+            ).strip()
+        )
+    except ValueError:
+        return (
+            "OAuth configuration error: ADMIN_ID must be numeric.",
+            500,
+        )
+
+    if not public_url or admin_id <= 0:
+        return (
+            "OAuth configuration is missing: PUBLIC_URL/admin_id.",
+            400,
+        )
+
+    if admin_id != configured_admin:
         return "Forbidden", 403
-    url = create_authorization_url(public_url, owner)
-    return redirect(url)
+
+    try:
+        url = create_authorization_url(
+            public_url,
+            admin_id,
+        )
+
+        logging.info(
+            "GMAIL_OAUTH_START_OK admin_id=%s",
+            admin_id,
+        )
+        return redirect(url)
+
+    except Exception as exc:
+        logging.exception(
+            "GMAIL_OAUTH_START_FAILED"
+        )
+        return (
+            "Gmail OAuth start failed. "
+            f"Reason: {str(exc)[:500]}",
+            500,
+        )
 
 
 @bp.route(CALLBACK_PATH)
 def oauth_callback():
-    state = request.args.get("state", "")
+    state = request.args.get(
+        "state",
+        "",
+    ).strip()
+
+    try:
+        configured_admin = int(
+            os.getenv(
+                "ADMIN_ID",
+                "0",
+            ).strip()
+        )
+    except ValueError:
+        return (
+            "OAuth configuration error: ADMIN_ID is invalid.",
+            500,
+        )
+
     if not state:
+        logging.error(
+            "GMAIL_OAUTH_CALLBACK_MISSING_STATE"
+        )
         return "Missing OAuth state.", 400
-    with _lock, closing(_connect_db()) as conn:
-        info = conn.execute(
-            """
-            SELECT state, owner_user_id, created_at
-            FROM gmail_oauth_states
-            WHERE state=?
-            """,
-            (state,),
-        ).fetchone()
 
-        if info:
-            conn.execute(
-                "DELETE FROM gmail_oauth_states WHERE state=?",
-                (state,),
+    if not _verify_state(
+        state,
+        configured_admin,
+    ):
+        logging.error(
+            "GMAIL_OAUTH_STATE_INVALID"
+        )
+        return (
+            "Invalid or expired OAuth state. "
+            "Please start Gmail connection again from Telegram.",
+            400,
+        )
+
+    if request.args.get("error"):
+        error = request.args.get(
+            "error",
+            "access_denied",
+        )
+        logging.warning(
+            "GMAIL_OAUTH_USER_DENIED error=%s",
+            error,
+        )
+        return (
+            "Google authorization was cancelled or denied. "
+            "Please return to Telegram and try again.",
+            400,
+        )
+
+    public_url = os.getenv(
+        "PUBLIC_URL",
+        "",
+    ).strip()
+
+    try:
+        flow = _flow(
+            public_url,
+            state=state,
+        )
+
+        flow.fetch_token(
+            authorization_response=request.url
+        )
+
+        service = build(
+            "gmail",
+            "v1",
+            credentials=flow.credentials,
+            cache_discovery=False,
+        )
+
+        profile = (
+            service.users()
+            .getProfile(userId="me")
+            .execute()
+        )
+
+        email = (
+            profile
+            .get(
+                "emailAddress",
+                "",
             )
-            conn.commit()
+            .strip()
+            .lower()
+        )
 
-    if not info:
-        return "Invalid or expired OAuth state.", 400
+        if not email:
+            return (
+                "Could not identify Gmail mailbox.",
+                400,
+            )
 
-    public_url = os.getenv("PUBLIC_URL", "").strip()
-    flow = _flow(public_url, state=state)
-    flow.fetch_token(authorization_response=request.url)
+        save_credentials(
+            flow.credentials,
+            email,
+        )
 
-    service = build("gmail", "v1", credentials=flow.credentials, cache_discovery=False)
-    profile = service.users().getProfile(userId="me").execute()
-    email = profile.get("emailAddress", "").strip().lower()
-    if not email:
-        return "Could not identify Gmail mailbox.", 400
+        logging.info(
+            "GMAIL_OAUTH_CALLBACK_OK email=%s",
+            email,
+        )
 
-    save_credentials(flow.credentials, email)
-    return (
-        "Gmail connected successfully. You may close this page and return to Telegram."
-    )
+        return (
+            "Gmail connected successfully. "
+            "You may close this page and return to Telegram."
+        )
+
+    except Exception as exc:
+        logging.exception(
+            "GMAIL_OAUTH_CALLBACK_FAILED"
+        )
+        return (
+            "Gmail OAuth callback failed. "
+            f"Reason: {str(exc)[:500]}",
+            500,
+        )
 
 
 def register_flask(app):
     init_db()
-    app.register_blueprint(bp)
+
+    endpoints = {
+        rule.endpoint
+        for rule in app.url_map.iter_rules()
+    }
+
+    if "gmail_oauth.oauth_start" not in endpoints:
+        app.register_blueprint(bp)
