@@ -519,8 +519,29 @@ def oauth_callback():
             state=state,
         )
 
+        logging.info(
+            "GMAIL_OAUTH_CALLBACK_TOKEN_EXCHANGE_START public_url=%s callback_path=%s",
+            public_url,
+            CALLBACK_PATH,
+        )
+
+        # Render terminates HTTPS at its proxy and Flask may see the
+        # internal request scheme as http. oauthlib then rejects request.url
+        # as insecure_transport. Rebuild the callback URL from PUBLIC_URL,
+        # which is the real public HTTPS origin.
+        query_string = request.query_string.decode(
+            "utf-8",
+            errors="replace",
+        )
+        callback_url = (
+            public_url.rstrip("/")
+            + CALLBACK_PATH
+        )
+        if query_string:
+            callback_url += "?" + query_string
+
         flow.fetch_token(
-            authorization_response=request.url
+            authorization_response=callback_url
         )
 
         service = build(
