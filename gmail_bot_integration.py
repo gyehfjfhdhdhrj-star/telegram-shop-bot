@@ -1,4 +1,4 @@
-
+"""Separate Gmail OAuth admin integration for MLBB MARKET.
 Does not modify main.py or supabase_launcher.py.
 Does not extract/store/forward OTP codes.
 """
