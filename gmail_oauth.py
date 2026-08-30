@@ -164,29 +164,16 @@ def _make_state(admin_id: int) -> str:
     return f"{encoded}.{_signature(encoded)}"
 
 
-def _verify_state_detailed(
-    state: str,
-    expected_admin_id: int,
-) -> tuple[bool, str]:
-    if not state:
-        return False, "missing"
-
-    if not STATE_SECRET:
-        return False, "secret_missing"
-
+def _verify_state(state: str, expected_admin_id: int) -> bool:
     try:
-        parts = state.split(".", 1)
-        if len(parts) != 2:
-            return False, "format"
-
-        encoded, supplied_signature = parts
+        encoded, supplied_signature = state.split(".", 1)
         expected_signature = _signature(encoded)
 
         if not hmac.compare_digest(
             supplied_signature,
             expected_signature,
         ):
-            return False, "signature"
+            return False
 
         payload = json.loads(
             _b64d(encoded).decode("utf-8")
@@ -196,33 +183,12 @@ def _verify_state_detailed(
         admin_id = int(payload.get("admin_id", 0))
 
         if admin_id != int(expected_admin_id):
-            return False, "admin"
+            return False
 
         age = int(time.time()) - issued_at
-        if age < 0:
-            return False, "clock"
-
-        if age > STATE_TTL_SECONDS:
-            return False, "expired"
-
-        return True, "ok"
-
-    except Exception as exc:
-        logging.exception(
-            "GMAIL_OAUTH_STATE_VERIFY_EXCEPTION"
-        )
-        return False, f"exception:{type(exc).__name__}"
-
-
-def _verify_state(
-    state: str,
-    expected_admin_id: int,
-) -> bool:
-    ok, _ = _verify_state_detailed(
-        state,
-        expected_admin_id,
-    )
-    return ok
+        return 0 <= age <= STATE_TTL_SECONDS
+    except Exception:
+        return False
 
 
 def create_authorization_url(
@@ -233,11 +199,21 @@ def create_authorization_url(
     state = _make_state(owner_user_id)
     flow = _flow(public_url, state=state)
 
-    authorization_url, _ = flow.authorization_url(
+    # IMPORTANT:
+    # Pass the signed state explicitly. Setting flow.state alone is not
+    # sufficient because google-auth-oauthlib may generate its own random
+    # state when authorization_url() is called without state=....
+    authorization_url, generated_state = flow.authorization_url(
+        state=state,
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
     )
+
+    if generated_state != state:
+        raise RuntimeError(
+            "OAuth state mismatch while creating authorization URL."
+        )
     return authorization_url
 
 
@@ -498,20 +474,21 @@ def oauth_callback():
         )
         return "Missing OAuth state.", 400
 
-    state_ok, state_reason = _verify_state_detailed(
-        state,
-        configured_admin,
+    logging.info(
+        "GMAIL_OAUTH_CALLBACK_STATE_RECEIVED state_len=%s state_prefix=%s",
+        len(state),
+        state[:8],
     )
 
-    if not state_ok:
+    if not _verify_state(
+        state,
+        configured_admin,
+    ):
         logging.error(
-            "GMAIL_OAUTH_STATE_INVALID reason=%s state_len=%s",
-            state_reason,
-            len(state),
+            "GMAIL_OAUTH_STATE_INVALID"
         )
         return (
-            "Invalid OAuth state. "
-            f"Reason: {state_reason}. "
+            "Invalid or expired OAuth state. "
             "Please start Gmail connection again from Telegram.",
             400,
         )
