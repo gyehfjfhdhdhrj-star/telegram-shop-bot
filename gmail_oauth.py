@@ -14,7 +14,6 @@ codes.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import secrets
 import sqlite3
@@ -54,15 +53,6 @@ def init_db():
     with _lock, closing(_connect_db()) as conn:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS gmail_oauth_states (
-                state TEXT PRIMARY KEY,
-                owner_user_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
             CREATE TABLE IF NOT EXISTS gmail_mailboxes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE,
@@ -95,20 +85,11 @@ def _flow(public_url: str, state: Optional[str] = None) -> Flow:
 def create_authorization_url(public_url: str, owner_user_id: int) -> str:
     init_db()
     state = secrets.token_urlsafe(32)
-    created_at = datetime.now(timezone.utc).isoformat()
-    with _lock, closing(_connect_db()) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO gmail_oauth_states(
-                state,
-                owner_user_id,
-                created_at
-            )
-            VALUES (?, ?, ?)
-            """,
-            (state, int(owner_user_id), created_at),
-        )
-        conn.commit()
+    with _lock:
+        _state[state] = {
+            "owner_user_id": int(owner_user_id),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
     flow = _flow(public_url, state=state)
     authorization_url, _ = flow.authorization_url(
         access_type="offline",
@@ -225,23 +206,8 @@ def oauth_callback():
     state = request.args.get("state", "")
     if not state:
         return "Missing OAuth state.", 400
-    with _lock, closing(_connect_db()) as conn:
-        info = conn.execute(
-            """
-            SELECT state, owner_user_id, created_at
-            FROM gmail_oauth_states
-            WHERE state=?
-            """,
-            (state,),
-        ).fetchone()
-
-        if info:
-            conn.execute(
-                "DELETE FROM gmail_oauth_states WHERE state=?",
-                (state,),
-            )
-            conn.commit()
-
+    with _lock:
+        info = _state.pop(state, None)
     if not info:
         return "Invalid or expired OAuth state.", 400
 
