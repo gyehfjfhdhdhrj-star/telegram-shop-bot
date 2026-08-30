@@ -89,6 +89,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE,
                 token_path TEXT NOT NULL,
+                token_json TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'available',
                 moonton_status TEXT NOT NULL DEFAULT 'not_changed',
                 assigned_account TEXT NOT NULL DEFAULT '',
@@ -96,6 +97,20 @@ def init_db():
             )
             """
         )
+
+        # Existing Render/Supabase-restored DBs may predate token_json.
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(gmail_mailboxes)"
+            ).fetchall()
+        }
+        if "token_json" not in columns:
+            conn.execute(
+                "ALTER TABLE gmail_mailboxes "
+                "ADD COLUMN token_json TEXT NOT NULL DEFAULT ''"
+            )
+
         conn.commit()
 
 
@@ -248,8 +263,12 @@ def save_credentials(
     init_db()
     path = _safe_token_path(email)
 
+    token_json = creds.to_json()
+
+    # Keep a local copy for immediate use, but the DB copy is the
+    # persistent source because shop.db is already backed up/restored.
     path.write_text(
-        creds.to_json(),
+        token_json,
         encoding="utf-8",
     )
 
@@ -264,16 +283,22 @@ def save_credentials(
             INSERT INTO gmail_mailboxes(
                 email,
                 token_path,
+                token_json,
                 status,
                 updated_at
             )
-            VALUES(?, ?, 'available', CURRENT_TIMESTAMP)
+            VALUES(?, ?, ?, 'available', CURRENT_TIMESTAMP)
             ON CONFLICT(email) DO UPDATE SET
                 token_path=excluded.token_path,
+                token_json=excluded.token_json,
                 status='available',
                 updated_at=CURRENT_TIMESTAMP
             """,
-            (email, str(path)),
+            (
+                email,
+                str(path),
+                token_json,
+            ),
         )
         conn.commit()
 
@@ -286,7 +311,7 @@ def load_credentials(
     with closing(_connect_db()) as conn:
         row = conn.execute(
             """
-            SELECT token_path
+            SELECT token_path, token_json
             FROM gmail_mailboxes
             WHERE email=?
             """,
@@ -296,14 +321,31 @@ def load_credentials(
     if not row:
         return None
 
-    path = Path(row["token_path"])
-    if not path.is_file():
-        return None
+    creds = None
+    token_json = (row["token_json"] or "").strip()
 
-    creds = Credentials.from_authorized_user_file(
-        str(path),
-        SCOPES,
-    )
+    # Prefer the persistent DB copy after Render restart/redeploy.
+    if token_json:
+        try:
+            creds = Credentials.from_authorized_user_info(
+                json.loads(token_json),
+                SCOPES,
+            )
+        except Exception:
+            logging.exception(
+                "GMAIL_TOKEN_DB_LOAD_FAILED email=%s",
+                email,
+            )
+            creds = None
+
+    # Backward-compatible fallback for an older local token file.
+    if creds is None:
+        path = Path(row["token_path"])
+        if path.is_file():
+            creds = Credentials.from_authorized_user_file(
+                str(path),
+                SCOPES,
+            )
 
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
