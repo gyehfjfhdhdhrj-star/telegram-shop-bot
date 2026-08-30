@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 import threading
 import logging
+import html
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
@@ -328,6 +329,20 @@ def install(original):
                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS premium_buy_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        buyer_user_id INTEGER NOT NULL,
+                        account_id INTEGER NOT NULL,
+                        account_code TEXT NOT NULL,
+                        price INTEGER NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'awaiting_receipt',
+                        receipt_file_id TEXT NOT NULL DEFAULT '',
+                        receipt_type TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
                 conn.commit()
 
     init_feature_db()
@@ -509,13 +524,6 @@ def install(original):
     def format_account_wrapped(acc):
         lines = original._premium_v8_format_account(acc).split("\n")
         lines = [line.replace("GAMING SHOP", "Aung Gyi GameShop") for line in lines]
-
-        skin = short_skins(acc.get("skins"))
-        if skin and not any("ပါတဲ့ Skinတွေ" in x for x in lines):
-            lines.insert(
-                min(3, len(lines)),
-                f"🎨 <b>ပါတဲ့ Skinတွေ — {skin}</b>\n📝 <i>Skin အချက်အလက်တွေကို ဒီနေရာမှာ ပြထားပါတယ်။</i>",
-            )
 
         if not any("Admin စစ်ဆေးပြီး" in x for x in lines):
             lines.insert(min(4, len(lines)), "✅ <b>Admin စစ်ဆေးပြီး</b>")
@@ -815,6 +823,107 @@ def install(original):
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]),
                 )
+            return True
+
+        if data == "premium_buy_cancel":
+            bot.answer_callback_query(call.id)
+            original.clear_state(call.from_user.id)
+            bot.send_message(
+                call.message.chat.id,
+                "✅ ဝယ်ယူမှုကို ပယ်ဖျက်လိုက်ပါပြီ။",
+                reply_markup=buyer_features_menu(),
+            )
+            return True
+
+        if data.startswith("premium_buy_confirm_"):
+            bot.answer_callback_query(call.id)
+            aid = data.replace("premium_buy_confirm_", "", 1)
+            try:
+                _send_buy_payment(
+                    call.message.chat.id,
+                    call.from_user.id,
+                    int(aid),
+                )
+            except Exception:
+                logging.exception("Buy payment step failed")
+                bot.send_message(
+                    call.message.chat.id,
+                    "❌ ဝယ်ယူမှုဆက်လုပ်ရာမှာ အမှားရှိနေပါတယ်။",
+                    reply_markup=buyer_features_menu(),
+                )
+            return True
+
+        if data.startswith("premium_buy_admin_approve_"):
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+                return True
+            bot.answer_callback_query(call.id)
+            request_id = int(data.replace("premium_buy_admin_approve_", "", 1))
+            req = rows(
+                "SELECT buyer_user_id, account_code, status FROM premium_buy_requests WHERE id=?",
+                (request_id,),
+            )
+            if not req:
+                bot.send_message(ADMIN_ID, "❌ Buy Request မတွေ့ပါ။", reply_markup=admin_features_menu())
+                return True
+            buyer_id = int(req[0]["buyer_user_id"])
+            if req[0]["status"] == "approved":
+                bot.send_message(ADMIN_ID, "ℹ️ ဒီ Request ကို အတည်ပြုပြီးသားပါ။", reply_markup=admin_features_menu())
+                return True
+            with db_lock:
+                with closing(db_connect()) as conn:
+                    conn.execute(
+                        "UPDATE premium_buy_requests SET status='approved', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (request_id,),
+                    )
+                    conn.commit()
+            final_text = (
+                "✅ <b>Admin အကောင့်အား ဂိမ်း Account ရယူဖို့ အခုဘဲ ဆက်သွယ်ပါခင်ဗျာ။</b>\n\n"
+                "Admin လိုင်းပေါ်မရှိပါက ဖုန်းဆက်ပါခင်ဗျာ\n"
+                "<b>09987479721</b>"
+            )
+            bot.send_message(
+                buyer_id,
+                final_text,
+                parse_mode="HTML",
+                reply_markup=buyer_features_menu(),
+            )
+            bot.send_message(
+                ADMIN_ID,
+                f"✅ BUY-{request_id:04d} ကို အတည်ပြုပြီး Buyer ဆီ ပို့ပြီးပါပြီ။",
+                reply_markup=admin_features_menu(),
+            )
+            return True
+
+        if data.startswith("premium_buy_admin_reject_"):
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(call.id, "Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+                return True
+            bot.answer_callback_query(call.id)
+            request_id = int(data.replace("premium_buy_admin_reject_", "", 1))
+            req = rows(
+                "SELECT buyer_user_id FROM premium_buy_requests WHERE id=?",
+                (request_id,),
+            )
+            if req:
+                buyer_id = int(req[0]["buyer_user_id"])
+                with db_lock:
+                    with closing(db_connect()) as conn:
+                        conn.execute(
+                            "UPDATE premium_buy_requests SET status='rejected', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                            (request_id,),
+                        )
+                        conn.commit()
+                bot.send_message(
+                    buyer_id,
+                    "❌ Admin က ပြေစာကို အတည်မပြုနိုင်သေးပါ။ Admin ဆီ တိုက်ရိုက်ဆက်သွယ်ပါခင်ဗျာ။",
+                    reply_markup=buyer_features_menu(),
+                )
+            bot.send_message(
+                ADMIN_ID,
+                f"❌ BUY-{request_id:04d} ကို ငြင်းလိုက်ပါပြီ။",
+                reply_markup=admin_features_menu(),
+            )
             return True
 
         if data.startswith("premium_fast_buy_"):
@@ -1122,6 +1231,238 @@ def install(original):
         bot.send_message(ADMIN_ID, f"✅ <b>{aid}</b> Flash Deal တင်ပြီးပါပြီ။\n\n🔥 {price:,} MMK\n⏰ {minutes} မိနစ်", parse_mode="HTML", reply_markup=admin_features_menu())
 
     # ------------------------------------------------------------
+    # Buy request flow
+    # ------------------------------------------------------------
+    def _esc(value):
+        return html.escape("" if value is None else str(value), quote=False)
+
+    def _effective_buy_price(acc):
+        deal = active_flash(acc.get("db_id")) if acc else None
+        return int(deal[0]) if deal else int(acc.get("effective_price") or acc.get("price") or 0)
+
+    def _save_buy_request(buyer_user_id, acc, price, receipt_file_id, receipt_type):
+        with db_lock:
+            with closing(db_connect()) as conn:
+                cur = conn.execute(
+                    """INSERT INTO premium_buy_requests(
+                        buyer_user_id, account_id, account_code, price, status,
+                        receipt_file_id, receipt_type, updated_at
+                    ) VALUES(?, ?, ?, ?, 'pending_admin', ?, ?, CURRENT_TIMESTAMP)""",
+                    (
+                        int(buyer_user_id),
+                        int(acc["db_id"]),
+                        str(acc["id"]),
+                        int(price),
+                        str(receipt_file_id),
+                        str(receipt_type),
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid)
+
+    def _start_buy_by_code(chat_id, user_id, raw_code):
+        code = (raw_code or "").strip().upper()
+        acc = account_by_text(code)
+        if not acc:
+            msg = bot.send_message(
+                chat_id,
+                "❌ ဒီ Account Code ကို Database ထဲမှာ မတွေ့ပါဘူး။\n\n"
+                "ဥပမာ — <code>ACC-003</code>\n\n"
+                "Account Code ကို ပြန်ရိုက်ပို့ပါ။",
+                parse_mode="HTML",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(
+                msg,
+                lambda m: _start_buy_by_code(
+                    m.chat.id, m.from_user.id, m.text
+                ),
+            )
+            return
+
+        if acc.get("status") != "available":
+            bot.send_message(
+                chat_id,
+                "❌ ဒီ Account ကို လက်ရှိ ဝယ်ယူလို့မရတော့ပါဘူး။",
+                reply_markup=buyer_features_menu(),
+            )
+            return
+
+        price = _effective_buy_price(acc)
+        original.set_state(
+            user_id,
+            {
+                "flow": "buy_confirm",
+                "buy_account_id": int(acc["db_id"]),
+                "buy_account_code": str(acc["id"]),
+                "buy_price": int(price),
+            },
+        )
+
+        m = InlineKeyboardMarkup(row_width=2)
+        m.row(
+            InlineKeyboardButton(
+                "✅ အတည်ပြုမယ်",
+                callback_data=f"premium_buy_confirm_{int(acc['db_id'])}",
+            ),
+            InlineKeyboardButton(
+                "❌ မဝယ်တော့ဘူး",
+                callback_data="premium_buy_cancel",
+            ),
+        )
+
+        bot.send_message(
+            chat_id,
+            "🛒 <b>Account ဝယ်ယူရန် အတည်ပြုပါ</b>\n\n"
+            f"🆔 <b>{_esc(acc['id'])}</b>\n"
+            f"💰 ဝယ်ဈေး — <b>{price:,} MMK</b>\n\n"
+            "ဒီ Account ကို ဝယ်ယူမယ်ဆိုရင် <b>အတည်ပြုမယ်</b> ကိုနှိပ်ပါ။",
+            parse_mode="HTML",
+            reply_markup=m,
+        )
+
+    def _buy_receipt_receive(message):
+        state = original.get_state(message.from_user.id)
+        aid = int(state.get("buy_account_id", 0) or 0)
+        price = int(state.get("buy_price", 0) or 0)
+        code = str(state.get("buy_account_code", ""))
+
+        acc = account_by_number(aid)
+        if not acc or not code or price <= 0:
+            bot.send_message(
+                message.chat.id,
+                "❌ ဝယ်ယူမှုအချက်အလက် မတွေ့တော့ပါ။ ထပ်စပြီး Account ဝယ်မယ်ကို နှိပ်ပါ။",
+                reply_markup=buyer_features_menu(),
+            )
+            return
+
+        receipt_file_id = ""
+        receipt_type = ""
+        if getattr(message, "photo", None):
+            receipt_file_id = message.photo[-1].file_id
+            receipt_type = "photo"
+        elif getattr(message, "document", None):
+            receipt_file_id = message.document.file_id
+            receipt_type = "document"
+
+        if not receipt_file_id:
+            msg = bot.send_message(
+                message.chat.id,
+                "❌ ပြေစာပုံ ပို့ပေးပါခင်ဗျာ။\n\n"
+                "ဓာတ်ပုံ (သို့) image file အဖြစ် ပို့လို့ရပါတယ်။",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(msg, _buy_receipt_receive)
+            return
+
+        request_id = _save_buy_request(
+            message.from_user.id,
+            acc,
+            price,
+            receipt_file_id,
+            receipt_type,
+        )
+
+        original.clear_state(message.from_user.id)
+
+        bot.send_message(
+            message.chat.id,
+            "⏳ ခနစောင့်ပါခင်ဗျာ။\n"
+            "Admin သင့်ကို Account ပေးဖို့ ဆက်သွယ်နေပါပြီ။",
+            reply_markup=buyer_features_menu(),
+        )
+
+        profile = format_account_wrapped(acc)
+        admin_caption = (
+            "🛒 <b>Account ဝယ်ယူမှု Request</b>\n\n"
+            f"📌 Request — <b>BUY-{request_id:04d}</b>\n"
+            f"👤 Buyer ID — <code>{int(message.from_user.id)}</code>\n"
+            f"🆔 Account Code — <b>{_esc(code)}</b>\n"
+            f"💰 Price — <b>{price:,} MMK</b>\n\n"
+            f"{profile}"
+        )
+        admin_markup = InlineKeyboardMarkup(row_width=2)
+        admin_markup.row(
+            InlineKeyboardButton(
+                "✅ အတည်ပြုမယ်",
+                callback_data=f"premium_buy_admin_approve_{request_id}",
+            ),
+            InlineKeyboardButton(
+                "❌ ငြင်းမယ်",
+                callback_data=f"premium_buy_admin_reject_{request_id}",
+            ),
+        )
+
+        try:
+            if receipt_type == "photo":
+                bot.send_photo(
+                    ADMIN_ID,
+                    receipt_file_id,
+                    caption=admin_caption,
+                    parse_mode="HTML",
+                    reply_markup=admin_markup,
+                )
+            else:
+                bot.send_document(
+                    ADMIN_ID,
+                    receipt_file_id,
+                    caption=admin_caption,
+                    parse_mode="HTML",
+                    reply_markup=admin_markup,
+                )
+        except Exception:
+            logging.exception("Buy receipt forwarding failed request=%s", request_id)
+            bot.send_message(
+                ADMIN_ID,
+                admin_caption,
+                parse_mode="HTML",
+                reply_markup=admin_markup,
+            )
+
+    def _send_buy_payment(chat_id, user_id, account_db_id):
+        state = original.get_state(user_id)
+        if int(state.get("buy_account_id", 0) or 0) != int(account_db_id):
+            bot.send_message(
+                chat_id,
+                "❌ ဒီဝယ်ယူမှု Request မမှန်တော့ပါဘူး။ Account ဝယ်မယ်ကို ပြန်စပါ။",
+                reply_markup=buyer_features_menu(),
+            )
+            return
+
+        acc = account_by_number(account_db_id)
+        if not acc or acc.get("status") != "available":
+            bot.send_message(
+                chat_id,
+                "❌ ဒီ Account ကို လက်ရှိ ဝယ်ယူလို့မရတော့ပါဘူး။",
+                reply_markup=buyer_features_menu(),
+            )
+            return
+
+        price = _effective_buy_price(acc)
+        original.set_state(
+            user_id,
+            {
+                "flow": "buy_receipt",
+                "buy_account_id": int(account_db_id),
+                "buy_account_code": str(acc["id"]),
+                "buy_price": int(price),
+            },
+        )
+
+        msg = bot.send_message(
+            chat_id,
+            "💳 <b>ငွေလွဲရန် အချက်အလက်</b>\n\n"
+            f"🆔 Account — <b>{_esc(acc['id'])}</b>\n"
+            f"💰 ပေးချေရမည့်ငွေ — <b>{price:,} MMK</b>\n\n"
+            "KPay — <b>09683259225</b> (Kyaw Min Khaing)\n"
+            "Wave — <b>09987479721</b> (Min Myat Aung)\n\n"
+            "ငွေလွဲပြီးရင် <b>ပြေစာပို့ပေးပါ</b>။",
+            parse_mode="HTML",
+            reply_markup=original.back_button(),
+        )
+        bot.register_next_step_handler(msg, _buy_receipt_receive)
+
+    # ------------------------------------------------------------
     # Reliable callback interception.
     # This is the key fix for generic handler ordering in main.py.
     # ------------------------------------------------------------
@@ -1144,20 +1485,20 @@ def install(original):
                     if text_value == "🛒 အကောင့်ဝယ်မယ်":
                         try:
                             original.clear_state(message.from_user.id)
-                            original.bot.send_message(
+                            msg = original.bot.send_message(
                                 message.chat.id,
                                 "🛒 <b>အကောင့်ဝယ်မယ်</b>\n\n"
-                                "လိုချင်တဲ့ Skin နာမည်နဲ့ Budget ကို တစ်ကြောင်းတည်း ရိုက်ပို့ပါ။\n\n"
-                                "ဥပမာ — <code>Gusion | 200000</code>\n"
-                                "သို့မဟုတ် <code>Any | 300000</code>",
+                                "ဘရားသား ဝယ်ချင်တဲ့ Account ကို Ss ရိုက်ပြပေးပါခင်ဗျာ။\n\n"
+                                "ပြီးရင် Account ရဲ့ Code နာမည်ကို ရိုက်ပို့ပေးပါ။\n"
+                                "ဥပမာ — <code>ACC-003</code>",
                                 parse_mode="HTML",
-                                reply_markup=InlineKeyboardMarkup([
-                                    [InlineKeyboardButton("👀 အကောင့်အားလုံးကြည့်မယ်", callback_data="browse_0")],
-                                    [InlineKeyboardButton("💸 လျော့စျေးအကောင့်များ", callback_data="discount_menu")],
-                                    [InlineKeyboardButton("🔙 ပင်မ Menu", callback_data="home")]
-                                ])
+                                reply_markup=original.back_button(),
                             )
-                            original.set_state(message.from_user.id, {"flow": "buy_query"})
+                            original.set_state(message.from_user.id, {"flow": "buy_query_code"})
+                            original.bot.register_next_step_handler(
+                                msg,
+                                lambda m: _start_buy_by_code(m.chat.id, m.from_user.id, m.text),
+                            )
                         except Exception:
                             logging.exception("Quick buy keyboard failed")
                         continue
