@@ -38,6 +38,7 @@ from difflib import SequenceMatcher
 import threading
 import logging
 import html
+from urllib.parse import quote
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
@@ -343,6 +344,43 @@ def install(original):
                         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS premium_seller_deals (
+                        request_id INTEGER PRIMARY KEY,
+                        seller_user_id INTEGER NOT NULL,
+                        seller_expected_price INTEGER NOT NULL DEFAULT 0,
+                        seller_note TEXT NOT NULL DEFAULT '',
+                        admin_offer_price INTEGER NOT NULL DEFAULT 0,
+                        negotiation_count INTEGER NOT NULL DEFAULT 0,
+                        moonton_changeable TEXT NOT NULL DEFAULT '',
+                        gmail_mailbox_id INTEGER NOT NULL DEFAULT 0,
+                        gmail_email TEXT NOT NULL DEFAULT '',
+                        moonton_status TEXT NOT NULL DEFAULT 'not_started',
+                        moonton_proof_file_id TEXT NOT NULL DEFAULT '',
+                        moonton_proof_type TEXT NOT NULL DEFAULT '',
+                        admin_verified INTEGER NOT NULL DEFAULT 0,
+                        payout_destination TEXT NOT NULL DEFAULT '',
+                        payout_amount INTEGER NOT NULL DEFAULT 0,
+                        payout_receipt_file_id TEXT NOT NULL DEFAULT '',
+                        payout_receipt_type TEXT NOT NULL DEFAULT '',
+                        seller_payout_confirmed INTEGER NOT NULL DEFAULT 0,
+                        final_account_id INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'awaiting_admin_price',
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_premium_seller_deals_seller
+                    ON premium_seller_deals(seller_user_id)
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_premium_seller_deals_status
+                    ON premium_seller_deals(status)
+                """)
+
                 conn.commit()
 
     init_feature_db()
@@ -835,6 +873,449 @@ def install(original):
             )
             return True
 
+
+        # --------------------------------------------------------
+        # Seller negotiation / handoff callbacks
+        # --------------------------------------------------------
+        if data.startswith("seller_photos_done"):
+            bot.answer_callback_query(call.id)
+            return _intercept_sell_photos_done(call)
+
+        if data.startswith("premium_seller_offer_"):
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(
+                    call.id,
+                    "Admin သာ အသုံးပြုနိုင်ပါတယ်။",
+                    show_alert=True,
+                )
+                return True
+
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_offer_",
+                    "",
+                    1,
+                )
+            )
+
+            row = _seller_request_row(request_id)
+            deal = _seller_deal_row(request_id)
+
+            if not row:
+                bot.send_message(
+                    ADMIN_ID,
+                    "❌ Seller Request မတွေ့ပါ။",
+                )
+                return True
+
+            original.set_state(
+                ADMIN_ID,
+                {
+                    "flow": "premium_seller_set_offer",
+                    "request_id": request_id,
+                },
+            )
+
+            msg = bot.send_message(
+                ADMIN_ID,
+                f"💰 <b>SELL-{request_id:04d}</b>\n\n"
+                "Seller ကို ပေးမယ့်ဈေးကို ရိုက်ပေးပါ။\n"
+                "ဥပမာ — <code>120000</code>",
+                parse_mode="HTML",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(
+                msg,
+                _admin_set_seller_offer,
+            )
+            return True
+
+        if data.startswith("premium_seller_negotiate_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_negotiate_",
+                    "",
+                    1,
+                )
+            )
+            original.set_state(
+                call.from_user.id,
+                {
+                    "flow": "seller_negotiate_price",
+                    "request_id": request_id,
+                },
+            )
+            msg = bot.send_message(
+                call.message.chat.id,
+                "💰 <b>ကိုယ်လိုချင်တဲ့ဈေး</b> ကို ရိုက်ပို့ပါ။\n"
+                "ဥပမာ — <code>130000</code>",
+                parse_mode="HTML",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(
+                msg,
+                _seller_negotiate_price,
+            )
+            return True
+
+        if data.startswith("premium_seller_accept_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_accept_",
+                    "",
+                    1,
+                )
+            )
+
+            if call.from_user.id == ADMIN_ID:
+                return True
+
+            row = _seller_request_row(request_id)
+            deal = _seller_deal_row(request_id)
+
+            if not row or not deal:
+                bot.send_message(
+                    call.message.chat.id,
+                    "❌ Seller Request မတွေ့ပါ။",
+                    reply_markup=buyer_features_menu(),
+                )
+                return True
+
+            offer = int(deal["admin_offer_price"] or 0)
+            if offer <= 0:
+                bot.send_message(
+                    call.message.chat.id,
+                    "❌ Admin စျေး မရသေးပါ။",
+                    reply_markup=buyer_features_menu(),
+                )
+                return True
+
+            _upsert_seller_deal(
+                request_id,
+                call.from_user.id,
+                admin_offer_price=offer,
+                status="seller_accepted_offer",
+            )
+
+            # Ask whether seller can use the assigned Gmail for the Moonton change.
+            m = InlineKeyboardMarkup(row_width=2)
+            m.row(
+                InlineKeyboardButton(
+                    "✅ လုပ်နိုင်ပါတယ်",
+                    callback_data=f"premium_seller_moonton_yes_{request_id}",
+                ),
+                InlineKeyboardButton(
+                    "❌ မလုပ်နိုင်ပါ",
+                    callback_data=f"premium_seller_moonton_no_{request_id}",
+                ),
+            )
+            bot.send_message(
+                call.message.chat.id,
+                "✅ Admin ပေးတဲ့ <b>{:,} MMK</b> စျေးကို လက်ခံပြီးပါပြီ။\n\n"
+                "အခု <b>Moonton Mail ပြောင်းနိုင်/မပြောင်းနိုင်</b> ကို ရွေးပေးပါ။".format(offer),
+                parse_mode="HTML",
+                reply_markup=m,
+            )
+            return True
+
+        if data.startswith("premium_seller_moonton_yes_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_moonton_yes_",
+                    "",
+                    1,
+                )
+            )
+
+            row = _seller_request_row(request_id)
+            if not row:
+                return True
+
+            allocated = _allocate_available_gmail(
+                request_id,
+                int(row["user_id"]),
+            )
+            if not allocated:
+                bot.send_message(
+                    call.message.chat.id,
+                    "⏳ လောလောဆယ် Moonton Mail ပြောင်းရန် "
+                    "Gmail မရှိသေးပါ။ Admin ကို အသိပေးထားပါတယ်။",
+                    reply_markup=buyer_features_menu(),
+                )
+                bot.send_message(
+                    ADMIN_ID,
+                    f"⚠️ SELL-{request_id:04d} အတွက် "
+                    "Moonton Mail ပြောင်းရန် Available Gmail မရှိသေးပါ။",
+                )
+                return True
+
+            mailbox_id, gmail_email = allocated
+
+            gmail_inbox_url = (
+                "https://mail.google.com/mail/"
+                f"?authuser={quote(gmail_email, safe="")}#inbox"
+            )
+
+            assigned_markup = InlineKeyboardMarkup(row_width=1)
+            assigned_markup.add(
+                InlineKeyboardButton(
+                    "📧 Gmail Inbox ဖွင့်မယ်",
+                    url=gmail_inbox_url,
+                )
+            )
+            assigned_markup.add(
+                InlineKeyboardButton(
+                    "✅ Gmail ရပြီးပြီ",
+                    callback_data=f"premium_seller_gmail_ready_{request_id}",
+                )
+            )
+
+            bot.send_message(
+                call.message.chat.id,
+                "📧 <b>သင့်အတွက် Assigned Gmail</b>\n\n"
+                f"<code>{_esc(gmail_email)}</code>\n\n"
+                "အောက်က <b>Gmail Inbox ဖွင့်မယ်</b> ကိုနှိပ်ပြီး Gmail ကိုဖွင့်ပါ။\n\n"
+                "Gmail ရပြီးပါပြီဆိုရင် <b>Gmail ရပြီးပြီ</b> ကိုနှိပ်ပါ။",
+                parse_mode="HTML",
+                reply_markup=assigned_markup,
+            )
+            return True
+
+        if data.startswith("premium_seller_moonton_no_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_moonton_no_",
+                    "",
+                    1,
+                )
+            )
+            row = _seller_request_row(request_id)
+            if row:
+                _upsert_seller_deal(
+                    request_id,
+                    int(row["user_id"]),
+                    moonton_changeable="no",
+                    status="manual_moonton_transfer",
+                )
+                bot.send_message(
+                    call.message.chat.id,
+                    "ℹ️ Moonton Mail မပြောင်းနိုင်တဲ့အတွက် "
+                    "Admin က Manual Transfer အပိုင်းကို ဆက်သွယ်ပါမယ်။\n\n"
+                    "Gmail password / verification code ကို Bot ထဲ "
+                    "မပို့ပါနဲ့ခင်ဗျာ။",
+                    reply_markup=buyer_features_menu(),
+                )
+                bot.send_message(
+                    ADMIN_ID,
+                    f"⚠️ SELL-{request_id:04d} — Seller က "
+                    "Moonton Mail မပြောင်းနိုင်ကြောင်း ရွေးထားပါတယ်။ "
+                    "Manual transfer ကို စီမံပါ။",
+                )
+            return True
+
+        if data.startswith("premium_seller_accept_moonton_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_accept_moonton_",
+                    "",
+                    1,
+                )
+            )
+            _send_moonton_change_prompt(request_id)
+            return True
+
+        if data.startswith("premium_seller_gmail_ready_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_gmail_ready_",
+                    "",
+                    1,
+                )
+            )
+            row = _seller_request_row(request_id)
+            deal = _seller_deal_row(request_id)
+            if row and deal:
+                _upsert_seller_deal(
+                    request_id,
+                    int(row["user_id"]),
+                    status="awaiting_moonton_proof",
+                    moonton_status="seller_has_gmail",
+                )
+
+                try:
+                    bot.delete_message(
+                        call.message.chat.id,
+                        call.message.message_id,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Assigned Gmail message delete failed request=%s",
+                        request_id,
+                    )
+
+                bot.send_message(
+                    call.message.chat.id,
+                    "✅ Gmail ရပြီးပါပြီ။\n\n"
+                    "အခု Moonton Mail ပြောင်းပြီးကြောင်း Screenshot ပို့ပေးပါခင်ဗျာ။",
+                    reply_markup=original.back_button(),
+                )
+                original.set_state(
+                    call.from_user.id,
+                    {
+                        "flow": "seller_moonton_proof",
+                        "request_id": request_id,
+                    },
+                )
+            return True
+
+        if data.startswith("premium_seller_moonton_done_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_moonton_done_",
+                    "",
+                    1,
+                )
+            )
+            row = _seller_request_row(request_id)
+            if row:
+                bot.send_message(
+                    call.message.chat.id,
+                    "📸 ပြောင်းပြီးကြောင်း Screenshot ပို့ပေးပါခင်ဗျာ။",
+                    reply_markup=original.back_button(),
+                )
+                original.set_state(
+                    call.from_user.id,
+                    {
+                        "flow": "seller_moonton_proof",
+                        "request_id": request_id,
+                    },
+                )
+            return True
+
+        if data.startswith("premium_seller_admin_verify_"):
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(
+                    call.id,
+                    "Admin သာ အသုံးပြုနိုင်ပါတယ်။",
+                    show_alert=True,
+                )
+                return True
+
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_admin_verify_",
+                    "",
+                    1,
+                )
+            )
+            row = _seller_request_row(request_id)
+            deal = _seller_deal_row(request_id)
+
+            if not row or not deal:
+                return True
+
+            _upsert_seller_deal(
+                request_id,
+                int(row["user_id"]),
+                admin_verified=1,
+                status="seller_verified_ready_for_payout",
+                moonton_status="approved",
+            )
+
+            bot.send_message(
+                int(row["user_id"]),
+                "✅ Admin က Account / Moonton Mail ပြောင်းပြီးကြောင်း "
+                "စစ်ဆေးအတည်ပြုပြီးပါပြီ။\n\n"
+                "💸 Seller ကို ငွေလွှဲရန် နံပါတ်ကို ပို့ပေးပါခင်ဗျာ။",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "💳 ငွေလွှဲနံပါတ် ပို့မယ်",
+                            callback_data=f"premium_seller_payout_dest_{request_id}",
+                        )
+                    ]
+                ]),
+            )
+            return True
+
+        if data.startswith("premium_seller_payout_dest_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_payout_dest_",
+                    "",
+                    1,
+                )
+            )
+            original.set_state(
+                call.from_user.id,
+                {
+                    "flow": "seller_payout_destination",
+                    "request_id": request_id,
+                },
+            )
+            msg = bot.send_message(
+                call.message.chat.id,
+                "💳 Seller ကို ငွေလွှဲမယ့် KPay / Wave / Bank နံပါတ် "
+                "ကို ရိုက်ပို့ပါ။",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(
+                msg,
+                _seller_payout_destination_receive,
+            )
+            return True
+
+        if data.startswith("premium_seller_cancel_"):
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(
+                    call.id,
+                    "Admin သာ အသုံးပြုနိုင်ပါတယ်။",
+                    show_alert=True,
+                )
+                return True
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_cancel_",
+                    "",
+                    1,
+                )
+            )
+            row = _seller_request_row(request_id)
+            if row:
+                _upsert_seller_deal(
+                    request_id,
+                    int(row["user_id"]),
+                    status="cancelled",
+                )
+                with db_lock:
+                    with closing(db_connect()) as conn:
+                        conn.execute(
+                            "UPDATE seller_requests SET status='rejected' WHERE id=?",
+                            (request_id,),
+                        )
+                        conn.commit()
+                bot.send_message(
+                    int(row["user_id"]),
+                    "❌ ဒီ Seller Request ကို Admin က ပယ်ဖျက်လိုက်ပါပြီ။",
+                    reply_markup=buyer_features_menu(),
+                )
+            bot.send_message(
+                ADMIN_ID,
+                f"❌ SELL-{request_id:04d} ကို ပယ်ဖျက်လိုက်ပါပြီ။",
+            )
+            return True
+
         if data.startswith("premium_buy_confirm_"):
             bot.answer_callback_query(call.id)
             aid = data.replace("premium_buy_confirm_", "", 1)
@@ -892,6 +1373,84 @@ def install(original):
                 ADMIN_ID,
                 f"✅ BUY-{request_id:04d} ကို အတည်ပြုပြီး Buyer ဆီ ပို့ပြီးပါပြီ။",
                 reply_markup=admin_features_menu(),
+            )
+            return True
+
+
+        if data.startswith("premium_seller_payout_confirm_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_payout_confirm_",
+                    "",
+                    1,
+                )
+            )
+            row = _seller_request_row(request_id)
+            deal = _seller_deal_row(request_id)
+            if row and deal:
+                _upsert_seller_deal(
+                    request_id,
+                    int(row["user_id"]),
+                    seller_payout_confirmed=1,
+                    status="completed",
+                )
+                bot.send_message(
+                    int(row["user_id"]),
+                    "🎉 <b>လုပ်ငန်းစဉ် ပြီးပါပြီ။</b>\n\n"
+                    "Seller ငွေလက်ခံရရှိမှုကို အတည်ပြုပြီးပါပြီ။",
+                    parse_mode="HTML",
+                    reply_markup=buyer_features_menu(),
+                )
+                bot.send_message(
+                    ADMIN_ID,
+                    f"✅ SELL-{request_id:04d} လုပ်ငန်းစဉ် ပြီးပါပြီ။",
+                )
+            return True
+
+        if data.startswith("premium_admin_send_payout_receipt_"):
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(
+                    call.id,
+                    "Admin သာ အသုံးပြုနိုင်ပါတယ်။",
+                    show_alert=True,
+                )
+                return True
+
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_admin_send_payout_receipt_",
+                    "",
+                    1,
+                )
+            )
+            row = _seller_request_row(request_id)
+            deal = _seller_deal_row(request_id)
+
+            if not row or not deal:
+                bot.send_message(
+                    ADMIN_ID,
+                    "❌ Seller Request မတွေ့ပါ။",
+                )
+                return True
+
+            original.set_state(
+                ADMIN_ID,
+                {
+                    "flow": "seller_admin_payout_receipt",
+                    "request_id": request_id,
+                },
+            )
+            msg = bot.send_message(
+                ADMIN_ID,
+                f"📸 SELL-{request_id:04d} အတွက် "
+                "ငွေလွှဲပြီးကြောင်း Screenshot/ပြေစာ ပို့ပါ။",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(
+                msg,
+                _admin_payout_receipt_receive,
             )
             return True
 
@@ -1419,6 +1978,886 @@ def install(original):
                 reply_markup=admin_markup,
             )
 
+
+    # ------------------------------------------------------------
+    # Seller negotiation / handoff flow
+    # ------------------------------------------------------------
+    def _upsert_seller_deal(
+        request_id,
+        seller_user_id,
+        seller_expected_price=None,
+        seller_note=None,
+        admin_offer_price=None,
+        negotiation_count=None,
+        moonton_changeable=None,
+        status=None,
+        gmail_mailbox_id=None,
+        gmail_email=None,
+        moonton_status=None,
+        moonton_proof_file_id=None,
+        moonton_proof_type=None,
+        admin_verified=None,
+        payout_destination=None,
+        payout_amount=None,
+        payout_receipt_file_id=None,
+        payout_receipt_type=None,
+        seller_payout_confirmed=None,
+        final_account_id=None,
+    ):
+        existing = rows(
+            "SELECT * FROM premium_seller_deals WHERE request_id=?",
+            (int(request_id),),
+        )
+        base = existing[0] if existing else None
+
+        values = {
+            "request_id": int(request_id),
+            "seller_user_id": int(
+                seller_user_id
+                if seller_user_id is not None
+                else base["seller_user_id"]
+            ),
+            "seller_expected_price": int(
+                seller_expected_price
+                if seller_expected_price is not None
+                else (base["seller_expected_price"] if base else 0)
+            ),
+            "seller_note": str(
+                seller_note
+                if seller_note is not None
+                else (base["seller_note"] if base else "")
+            ),
+            "admin_offer_price": int(
+                admin_offer_price
+                if admin_offer_price is not None
+                else (base["admin_offer_price"] if base else 0)
+            ),
+            "negotiation_count": int(
+                negotiation_count
+                if negotiation_count is not None
+                else (base["negotiation_count"] if base else 0)
+            ),
+            "moonton_changeable": str(
+                moonton_changeable
+                if moonton_changeable is not None
+                else (base["moonton_changeable"] if base else "")
+            ),
+            "gmail_mailbox_id": int(
+                gmail_mailbox_id
+                if gmail_mailbox_id is not None
+                else (base["gmail_mailbox_id"] if base else 0)
+            ),
+            "gmail_email": str(
+                gmail_email
+                if gmail_email is not None
+                else (base["gmail_email"] if base else "")
+            ),
+            "moonton_status": str(
+                moonton_status
+                if moonton_status is not None
+                else (base["moonton_status"] if base else "not_started")
+            ),
+            "moonton_proof_file_id": str(
+                moonton_proof_file_id
+                if moonton_proof_file_id is not None
+                else (base["moonton_proof_file_id"] if base else "")
+            ),
+            "moonton_proof_type": str(
+                moonton_proof_type
+                if moonton_proof_type is not None
+                else (base["moonton_proof_type"] if base else "")
+            ),
+            "admin_verified": int(
+                admin_verified
+                if admin_verified is not None
+                else (base["admin_verified"] if base else 0)
+            ),
+            "payout_destination": str(
+                payout_destination
+                if payout_destination is not None
+                else (base["payout_destination"] if base else "")
+            ),
+            "payout_amount": int(
+                payout_amount
+                if payout_amount is not None
+                else (base["payout_amount"] if base else 0)
+            ),
+            "payout_receipt_file_id": str(
+                payout_receipt_file_id
+                if payout_receipt_file_id is not None
+                else (base["payout_receipt_file_id"] if base else "")
+            ),
+            "payout_receipt_type": str(
+                payout_receipt_type
+                if payout_receipt_type is not None
+                else (base["payout_receipt_type"] if base else "")
+            ),
+            "seller_payout_confirmed": int(
+                seller_payout_confirmed
+                if seller_payout_confirmed is not None
+                else (base["seller_payout_confirmed"] if base else 0)
+            ),
+            "final_account_id": int(
+                final_account_id
+                if final_account_id is not None
+                else (base["final_account_id"] if base else 0)
+            ),
+            "status": str(
+                status
+                if status is not None
+                else (base["status"] if base else "awaiting_admin_price")
+            ),
+        }
+
+        with db_lock:
+            with closing(db_connect()) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO premium_seller_deals(
+                        request_id, seller_user_id, seller_expected_price,
+                        seller_note, admin_offer_price, negotiation_count,
+                        moonton_changeable, gmail_mailbox_id, gmail_email,
+                        moonton_status, moonton_proof_file_id,
+                        moonton_proof_type, admin_verified,
+                        payout_destination, payout_amount,
+                        payout_receipt_file_id, payout_receipt_type,
+                        seller_payout_confirmed, final_account_id,
+                        status, updated_at
+                    )
+                    VALUES(
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT(request_id) DO UPDATE SET
+                        seller_user_id=excluded.seller_user_id,
+                        seller_expected_price=excluded.seller_expected_price,
+                        seller_note=excluded.seller_note,
+                        admin_offer_price=excluded.admin_offer_price,
+                        negotiation_count=excluded.negotiation_count,
+                        moonton_changeable=excluded.moonton_changeable,
+                        gmail_mailbox_id=excluded.gmail_mailbox_id,
+                        gmail_email=excluded.gmail_email,
+                        moonton_status=excluded.moonton_status,
+                        moonton_proof_file_id=excluded.moonton_proof_file_id,
+                        moonton_proof_type=excluded.moonton_proof_type,
+                        admin_verified=excluded.admin_verified,
+                        payout_destination=excluded.payout_destination,
+                        payout_amount=excluded.payout_amount,
+                        payout_receipt_file_id=excluded.payout_receipt_file_id,
+                        payout_receipt_type=excluded.payout_receipt_type,
+                        seller_payout_confirmed=excluded.seller_payout_confirmed,
+                        final_account_id=excluded.final_account_id,
+                        status=excluded.status,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (
+                        values["request_id"],
+                        values["seller_user_id"],
+                        values["seller_expected_price"],
+                        values["seller_note"],
+                        values["admin_offer_price"],
+                        values["negotiation_count"],
+                        values["moonton_changeable"],
+                        values["gmail_mailbox_id"],
+                        values["gmail_email"],
+                        values["moonton_status"],
+                        values["moonton_proof_file_id"],
+                        values["moonton_proof_type"],
+                        values["admin_verified"],
+                        values["payout_destination"],
+                        values["payout_amount"],
+                        values["payout_receipt_file_id"],
+                        values["payout_receipt_type"],
+                        values["seller_payout_confirmed"],
+                        values["final_account_id"],
+                        values["status"],
+                    ),
+                )
+                conn.commit()
+
+    def _seller_request_row(request_id):
+        result = rows(
+            "SELECT * FROM seller_requests WHERE id=?",
+            (int(request_id),),
+        )
+        return result[0] if result else None
+
+    def _seller_deal_row(request_id):
+        result = rows(
+            "SELECT * FROM premium_seller_deals WHERE request_id=?",
+            (int(request_id),),
+        )
+        return result[0] if result else None
+
+    def _seller_buying_end_markup():
+        return InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(
+                    "🏠 ပင်မ Menu",
+                    callback_data="home",
+                )
+            ]]
+        )
+
+    def _seller_offer_markup(request_id):
+        m = InlineKeyboardMarkup(row_width=2)
+        m.row(
+            InlineKeyboardButton(
+                "✅ ရောင်းမယ်",
+                callback_data=f"premium_seller_accept_{int(request_id)}",
+            ),
+            InlineKeyboardButton(
+                "💬 စျေးထပ်ညှိမယ်",
+                callback_data=f"premium_seller_negotiate_{int(request_id)}",
+            ),
+        )
+        m.add(
+            InlineKeyboardButton(
+                "🏠 ပင်မ Menu",
+                callback_data="home",
+            )
+        )
+        return m
+
+    def _admin_seller_offer_markup(request_id):
+        m = InlineKeyboardMarkup(row_width=2)
+        m.row(
+            InlineKeyboardButton(
+                "💰 စျေးပြန်ပေးမယ်",
+                callback_data=f"premium_seller_offer_{int(request_id)}",
+            ),
+            InlineKeyboardButton(
+                "❌ ပယ်ဖျက်မယ်",
+                callback_data=f"premium_seller_cancel_{int(request_id)}",
+            ),
+        )
+        return m
+
+    def _send_seller_offer_to_seller(request_id):
+        deal = _seller_deal_row(request_id)
+        row = _seller_request_row(request_id)
+        if not deal or not row or deal["admin_offer_price"] <= 0:
+            return False
+
+        offer = int(deal["admin_offer_price"])
+        note = _esc(deal["seller_note"])
+
+        text_out = (
+            "💰 <b>Admin က သင့် Account အတွက် စျေးသတ်မှတ်ပေးထားပါတယ်။</b>\n\n"
+            f"🆔 Request — <b>SELL-{int(request_id):04d}</b>\n"
+            f"💵 Admin ပေးမယ့်ဈေး — <b>{offer:,} MMK</b>\n"
+        )
+        if note:
+            text_out += f"📝 သင့် Note — {_esc(note)}\n"
+        text_out += "\nရောင်းမယ်ဆို <b>ရောင်းမယ်</b> ကိုနှိပ်ပါ။ စျေးထပ်ညှိမယ်ဆို <b>စျေးထပ်ညှိမယ်</b> ကိုနှိပ်ပါ။"
+
+        bot.send_message(
+            int(row["user_id"]),
+            text_out,
+            parse_mode="HTML",
+            reply_markup=_seller_offer_markup(request_id),
+        )
+        return True
+
+    def _start_seller_expected_price(message):
+        user_id = int(message.from_user.id)
+        state = original.get_state(user_id)
+        if state.get("flow") != "seller_expected_price":
+            return
+
+        raw = (message.text or "").replace(",", "").replace(" ", "").strip()
+        try:
+            price = int(raw)
+            if price <= 0:
+                raise ValueError
+        except Exception:
+            msg = bot.send_message(
+                message.chat.id,
+                "❌ ရောင်းချင်တဲ့ဈေး မမှန်ပါ။ ဥပမာ — <code>100000</code>",
+                parse_mode="HTML",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(
+                msg,
+                _start_seller_expected_price,
+            )
+            return
+
+        state.update({
+            "flow": "seller_note",
+            "seller_expected_price": price,
+        })
+        original.set_state(user_id, state)
+
+        msg = bot.send_message(
+            message.chat.id,
+            "📝 Seller Note ထည့်ချင်ရင် ဒီမှာ ရိုက်ပို့ပါ။\n"
+            "မထည့်ချင်ရင် <code>မရှိ</code> လို့ ရိုက်ပို့လို့ရပါတယ်။",
+            parse_mode="HTML",
+            reply_markup=original.back_button(),
+        )
+        bot.register_next_step_handler(
+            msg,
+            _finish_seller_submission,
+        )
+
+    def _finish_seller_submission(message):
+        user_id = int(message.from_user.id)
+        state = original.get_state(user_id)
+        if state.get("flow") != "seller_note":
+            return
+
+        note_raw = (message.text or "").strip()
+        note = "" if note_raw in {"မရှိ", "-", "မထည့်ဘူး", "none"} else note_raw
+        expected = int(state.get("seller_expected_price", 0) or 0)
+        photos = [p for p in (state.get("photos") or []) if p][:15]
+
+        if not photos:
+            bot.send_message(
+                message.chat.id,
+                "❌ Account ပုံတွေ မတွေ့ပါဘူး။ အကောင့်ရောင်းမယ်ကို ပြန်စပါ။",
+                reply_markup=buyer_features_menu(),
+            )
+            original.clear_state(user_id)
+            return
+
+        username = message.from_user.username or "No Username"
+
+        with db_lock:
+            with closing(db_connect()) as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO seller_requests(
+                        user_id, username, error_info, price,
+                        photo_count, status, photos
+                    )
+                    VALUES(?, ?, '', ?, ?, 'pending', ?)
+                    """,
+                    (
+                        user_id,
+                        username,
+                        expected,
+                        len(photos),
+                        ",".join(photos),
+                    ),
+                )
+                request_id = int(cur.lastrowid)
+
+                columns = {
+                    r["name"]
+                    for r in conn.execute(
+                        "PRAGMA table_info(seller_requests)"
+                    ).fetchall()
+                }
+                if "seller_note" not in columns:
+                    conn.execute(
+                        "ALTER TABLE seller_requests "
+                        "ADD COLUMN seller_note TEXT NOT NULL DEFAULT ''"
+                    )
+                if "seller_expected_price" not in columns:
+                    conn.execute(
+                        "ALTER TABLE seller_requests "
+                        "ADD COLUMN seller_expected_price INTEGER NOT NULL DEFAULT 0"
+                    )
+                conn.execute(
+                    """
+                    UPDATE seller_requests
+                    SET seller_note=?,
+                        seller_expected_price=?
+                    WHERE id=?
+                    """,
+                    (
+                        note,
+                        expected,
+                        request_id,
+                    ),
+                )
+                conn.commit()
+
+        _upsert_seller_deal(
+            request_id,
+            user_id,
+            seller_expected_price=expected,
+            seller_note=note,
+            status="awaiting_admin_price",
+        )
+
+        original.clear_state(user_id)
+
+        seller_summary = (
+            "📥 <b>Seller Account Request</b>\n\n"
+            f"🆔 Request — <b>SELL-{request_id:04d}</b>\n"
+            f"👤 @{_esc(username)}\n"
+            f"🆔 User ID — <code>{user_id}</code>\n"
+            f"📸 ပုံ — <b>{len(photos)}</b>\n"
+            f"💰 Seller လိုချင်တဲ့ဈေး — <b>{expected:,} MMK</b>\n"
+            f"📝 Seller Note — <b>{_esc(note or 'မရှိ')}</b>\n\n"
+            "ပုံတွေစစ်ပြီး Admin က စျေးပြန်ပေးပါ။"
+        )
+
+        try:
+            bot.send_message(
+                ADMIN_ID,
+                seller_summary,
+                parse_mode="HTML",
+                reply_markup=_admin_seller_offer_markup(request_id),
+            )
+            try:
+                original.send_photo_batches(
+                    ADMIN_ID,
+                    photos,
+                    10,
+                )
+            except Exception:
+                logging.exception(
+                    "Seller photos admin forwarding failed request=%s",
+                    request_id,
+                )
+        except Exception:
+            logging.exception(
+                "Seller admin notification failed request=%s",
+                request_id,
+            )
+
+        bot.send_message(
+            user_id,
+            "✅ သင့် Account Request ကို Admin ဆီ ပို့ပြီးပါပြီ။\n"
+            "Admin စျေးသတ်မှတ်ပေးတဲ့အထိ စောင့်ပေးပါခင်ဗျာ။",
+            reply_markup=buyer_features_menu(),
+        )
+
+    def _intercept_sell_photos_done(call):
+        user_id = int(call.from_user.id)
+        state = original.get_state(user_id)
+        photos = [p for p in (state.get("photos") or []) if p][:15]
+
+        if not photos:
+            bot.send_message(
+                call.message.chat.id,
+                "⚠️ အရင်ဆုံး Account ပုံ အနည်းဆုံး 1 ပုံ ပို့ပါ။",
+                reply_markup=original.back_button(),
+            )
+            return True
+
+        original.set_state(
+            user_id,
+            {
+                "flow": "seller_expected_price",
+                "photos": photos,
+            },
+        )
+        msg = bot.send_message(
+            call.message.chat.id,
+            "💰 <b>Seller ကိုပေးမယ့်ဈေး</b> ကို အရင်ရိုက်ပို့ပါ။\n\n"
+            "ဥပမာ — <code>100000</code>",
+            parse_mode="HTML",
+            reply_markup=original.back_button(),
+        )
+        bot.register_next_step_handler(
+            msg,
+            _start_seller_expected_price,
+        )
+        return True
+
+    def _admin_set_seller_offer(message):
+        if int(message.from_user.id) != ADMIN_ID:
+            return
+
+        state = original.get_state(ADMIN_ID)
+        if state.get("flow") != "premium_seller_set_offer":
+            return
+
+        request_id = int(
+            state.get("request_id", 0) or 0
+        )
+        raw = (message.text or "").replace(",", "").replace(" ", "").strip()
+
+        try:
+            offer = int(raw)
+            if offer <= 0:
+                raise ValueError
+        except Exception:
+            msg = bot.send_message(
+                ADMIN_ID,
+                "❌ စျေးမမှန်ပါ။ ဥပမာ — <code>120000</code>",
+                parse_mode="HTML",
+            )
+            bot.register_next_step_handler(
+                msg,
+                _admin_set_seller_offer,
+            )
+            return
+
+        deal = _seller_deal_row(request_id)
+        row = _seller_request_row(request_id)
+        if not deal or not row:
+            original.clear_state(ADMIN_ID)
+            bot.send_message(
+                ADMIN_ID,
+                "❌ Seller Request မတွေ့ပါ။",
+            )
+            return
+
+        _upsert_seller_deal(
+            request_id,
+            int(row["user_id"]),
+            admin_offer_price=offer,
+            status="awaiting_seller_offer_response",
+        )
+
+        original.clear_state(ADMIN_ID)
+
+        try:
+            _send_seller_offer_to_seller(request_id)
+        except Exception:
+            logging.exception(
+                "Seller offer delivery failed request=%s",
+                request_id,
+            )
+
+        bot.send_message(
+            ADMIN_ID,
+            f"✅ SELL-{request_id:04d} အတွက် <b>{offer:,} MMK</b> စျေးပို့ပြီးပါပြီ။",
+            parse_mode="HTML",
+        )
+
+    def _seller_negotiate_price(message):
+        user_id = int(message.from_user.id)
+        state = original.get_state(user_id)
+        if state.get("flow") != "seller_negotiate_price":
+            return
+
+        request_id = int(state.get("request_id", 0) or 0)
+        raw = (message.text or "").replace(",", "").replace(" ", "").strip()
+
+        try:
+            wanted = int(raw)
+            if wanted <= 0:
+                raise ValueError
+        except Exception:
+            msg = bot.send_message(
+                message.chat.id,
+                "❌ လိုချင်တဲ့ဈေး မမှန်ပါ။ ဥပမာ — <code>130000</code>",
+                parse_mode="HTML",
+            )
+            bot.register_next_step_handler(
+                msg,
+                _seller_negotiate_price,
+            )
+            return
+
+        state["flow"] = "seller_negotiate_note"
+        state["seller_negotiated_price"] = wanted
+        original.set_state(user_id, state)
+
+        msg = bot.send_message(
+            message.chat.id,
+            "📝 Admin ကို ပြောချင်တဲ့ Note ရေးပို့ပါ။\n"
+            "မရှိရင် <code>မရှိ</code> လို့ ရိုက်ပို့ပါ။",
+            parse_mode="HTML",
+            reply_markup=original.back_button(),
+        )
+        bot.register_next_step_handler(
+            msg,
+            _seller_negotiate_note,
+        )
+
+    def _seller_negotiate_note(message):
+        user_id = int(message.from_user.id)
+        state = original.get_state(user_id)
+        if state.get("flow") != "seller_negotiate_note":
+            return
+
+        request_id = int(state.get("request_id", 0) or 0)
+        wanted = int(
+            state.get("seller_negotiated_price", 0) or 0
+        )
+        note_raw = (message.text or "").strip()
+        note = "" if note_raw in {"မရှိ", "-", "none"} else note_raw
+
+        row = _seller_request_row(request_id)
+        deal = _seller_deal_row(request_id)
+
+        if not row or not deal:
+            original.clear_state(user_id)
+            bot.send_message(
+                user_id,
+                "❌ Seller Request မတွေ့ပါ။",
+                reply_markup=buyer_features_menu(),
+            )
+            return
+
+        count = int(deal["negotiation_count"] or 0) + 1
+        _upsert_seller_deal(
+            request_id,
+            user_id,
+            seller_note=note,
+            admin_offer_price=0,
+            negotiation_count=count,
+            status="awaiting_admin_counter",
+        )
+
+        original.clear_state(user_id)
+
+        admin_text = (
+            "💬 <b>Seller စျေးထပ်ညှိရန် Request</b>\n\n"
+            f"🆔 SELL-{request_id:04d}\n"
+            f"👤 @{_esc(row['username'] or 'No Username')}\n"
+            f"🆔 User ID — <code>{int(row['user_id'])}</code>\n"
+            f"💰 Seller လိုချင်တဲ့ဈေး — <b>{wanted:,} MMK</b>\n"
+            f"📝 Note — <b>{_esc(note or 'မရှိ')}</b>\n\n"
+            "Admin က စျေးပြန်ပေးပါ။"
+        )
+
+        # Keep seller's latest requested price in the source request too.
+        with db_lock:
+            with closing(db_connect()) as conn:
+                conn.execute(
+                    """
+                    UPDATE seller_requests
+                    SET price=?
+                    WHERE id=?
+                    """,
+                    (wanted, request_id),
+                )
+                conn.commit()
+
+        m = InlineKeyboardMarkup(row_width=1)
+        m.add(
+            InlineKeyboardButton(
+                "💰 စျေးပြန်ပေးမယ်",
+                callback_data=f"premium_seller_offer_{request_id}",
+            ),
+        )
+        bot.send_message(
+            ADMIN_ID,
+            admin_text,
+            parse_mode="HTML",
+            reply_markup=m,
+        )
+
+        bot.send_message(
+            user_id,
+            "✅ သင့်စျေးနဲ့ Note ကို Admin ဆီ ပို့ပြီးပါပြီ။\n"
+            "Admin စျေးပြန်ပေးတဲ့အထိ စောင့်ပေးပါခင်ဗျာ။",
+            reply_markup=buyer_features_menu(),
+        )
+
+    def _allocate_available_gmail(request_id, seller_user_id):
+        """Allocate a mailbox address, never expose authentication codes."""
+        try:
+            with closing(db_connect()) as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, email
+                    FROM gmail_mailboxes
+                    WHERE status='available'
+                      AND moonton_status='not_changed'
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """
+                ).fetchone()
+
+                if not row:
+                    return None
+
+                conn.execute(
+                    """
+                    UPDATE gmail_mailboxes
+                    SET status='assigned',
+                        moonton_status='pending',
+                        assigned_account=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (
+                        f"SELL-{int(request_id):04d}",
+                        int(row["id"]),
+                    ),
+                )
+                conn.commit()
+
+                _upsert_seller_deal(
+                    request_id,
+                    seller_user_id,
+                    gmail_mailbox_id=int(row["id"]),
+                    gmail_email=str(row["email"]),
+                    moonton_status="gmail_assigned",
+                    status="awaiting_seller_gmail_access",
+                )
+
+                return (
+                    int(row["id"]),
+                    str(row["email"]),
+                )
+        except Exception:
+            logging.exception(
+                "Available Gmail allocation failed request=%s",
+                request_id,
+            )
+            return None
+
+    def _create_marketplace_account_after_seller_accept(request_id):
+        """Create the listing only after seller accepted the admin offer.
+
+        This keeps the seller negotiation separate from the original
+        marketplace publish callback.
+        """
+        row = _seller_request_row(request_id)
+        deal = _seller_deal_row(request_id)
+        if not row or not deal:
+            return None
+
+        existing = int(deal["final_account_id"] or 0)
+        if existing:
+            return existing
+
+        # Account creation is delayed until proof/approval is complete.
+        return None
+
+    def _send_moonton_change_prompt(request_id):
+        deal = _seller_deal_row(request_id)
+        row = _seller_request_row(request_id)
+        if not deal or not row:
+            return False
+
+        text_out = (
+            "🔐 <b>Moonton Mail စတင်ချိန်းပါမယ်</b>\n\n"
+            "Admin က ချိတ်ထားတဲ့ Gmail ကို အသုံးပြုပြီး "
+            "Moonton Mail ပြောင်းပေးပါ။\n\n"
+            "ပြီးတာနဲ့ <b>Moonton Mail ပြောင်းပြီးပါပြီ</b> ကိုနှိပ်ပြီး "
+            "အတည်ပြု Screenshot ပို့ပေးပါ။\n\n"
+            "<i>လုံခြုံရေးအရ Gmail/Google verification code ကို Bot ထဲကနေ "
+            "အလိုအလျောက် ပြန်ပို့မပေးပါ။</i>"
+        )
+
+        m = InlineKeyboardMarkup(row_width=1)
+        m.add(
+            InlineKeyboardButton(
+                "✅ လက်ခံပါတယ်",
+                callback_data=f"premium_seller_accept_moonton_{request_id}",
+            )
+        )
+        m.add(
+            InlineKeyboardButton(
+                "📸 Moonton ပြောင်းပြီးပါပြီ",
+                callback_data=f"premium_seller_moonton_done_{request_id}",
+            )
+        )
+        m.add(
+            InlineKeyboardButton(
+                "🏠 ပင်မ Menu",
+                callback_data="home",
+            )
+        )
+
+        bot.send_message(
+            int(row["user_id"]),
+            text_out,
+            parse_mode="HTML",
+            reply_markup=m,
+        )
+        return True
+
+
+    def _admin_payout_receipt_receive(message):
+        if int(message.from_user.id) != ADMIN_ID:
+            return
+
+        state = original.get_state(ADMIN_ID)
+        if state.get("flow") != "seller_admin_payout_receipt":
+            return
+
+        request_id = int(state.get("request_id", 0) or 0)
+
+        file_id = ""
+        file_type = ""
+
+        if getattr(message, "photo", None):
+            file_id = message.photo[-1].file_id
+            file_type = "photo"
+        elif getattr(message, "document", None):
+            file_id = message.document.file_id
+            file_type = "document"
+
+        if not file_id:
+            msg = bot.send_message(
+                ADMIN_ID,
+                "❌ ငွေလွှဲပြေစာ Screenshot/ပုံ ပို့ပါ။",
+            )
+            bot.register_next_step_handler(
+                msg,
+                _admin_payout_receipt_receive,
+            )
+            return
+
+        row = _seller_request_row(request_id)
+        deal = _seller_deal_row(request_id)
+        if not row or not deal:
+            original.clear_state(ADMIN_ID)
+            return
+
+        _upsert_seller_deal(
+            request_id,
+            int(row["user_id"]),
+            payout_receipt_file_id=file_id,
+            payout_receipt_type=file_type,
+            status="awaiting_seller_payout_confirmation",
+        )
+        original.clear_state(ADMIN_ID)
+
+        seller_id = int(row["user_id"])
+
+        text_out = (
+            "💸 <b>Admin ငွေလွှဲပြီးပါပြီ။</b>\n\n"
+            f"🆔 SELL-{request_id:04d}\n"
+            f"💰 ပမာဏ — <b>{int(deal['payout_amount'] or deal['admin_offer_price'] or 0):,} MMK</b>\n\n"
+            "ပြေစာကိုကြည့်ပြီး ငွေတကယ်ရောက်ပြီဆိုရင် "
+            "<b>ငွေရောက်ပါပြီ</b> ကိုနှိပ်ပေးပါ။"
+        )
+
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton(
+                "✅ ငွေရောက်ပါပြီ",
+                callback_data=f"premium_seller_payout_confirm_{request_id}",
+            )
+        )
+
+        try:
+            if file_type == "photo":
+                bot.send_photo(
+                    seller_id,
+                    file_id,
+                    caption=text_out,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+            else:
+                bot.send_document(
+                    seller_id,
+                    file_id,
+                    caption=text_out,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+        except Exception:
+            logging.exception(
+                "Admin payout receipt delivery failed request=%s",
+                request_id,
+            )
+            bot.send_message(
+                seller_id,
+                text_out,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+
+        bot.send_message(
+            ADMIN_ID,
+            f"✅ SELL-{request_id:04d} payout receipt ကို Seller ဆီပို့ပြီးပါပြီ။",
+        )
+
     def _send_buy_payment(chat_id, user_id, account_db_id):
         state = original.get_state(user_id)
         if int(state.get("buy_account_id", 0) or 0) != int(account_db_id):
@@ -1462,6 +2901,226 @@ def install(original):
         )
         bot.register_next_step_handler(msg, _buy_receipt_receive)
 
+
+    def _seller_moonton_proof_receive(message, request_id=None):
+        user_id = int(message.from_user.id)
+        state = original.get_state(user_id)
+        rid = int(
+            request_id
+            if request_id is not None
+            else (state.get("request_id", 0) or 0)
+        )
+
+        file_id = ""
+        file_type = ""
+
+        if getattr(message, "photo", None):
+            file_id = message.photo[-1].file_id
+            file_type = "photo"
+        elif getattr(message, "document", None):
+            file_id = message.document.file_id
+            file_type = "document"
+
+        if not file_id:
+            bot.send_message(
+                user_id,
+                "❌ Screenshot ပုံ ပို့ပေးပါခင်ဗျာ။",
+                reply_markup=original.back_button(),
+            )
+            original.set_state(
+                user_id,
+                {
+                    "flow": "seller_moonton_proof",
+                    "request_id": rid,
+                },
+            )
+            return
+
+        row = _seller_request_row(rid)
+        if not row:
+            original.clear_state(user_id)
+            bot.send_message(
+                user_id,
+                "❌ Seller Request မတွေ့ပါ။",
+                reply_markup=buyer_features_menu(),
+            )
+            return
+
+        _upsert_seller_deal(
+            rid,
+            user_id,
+            moonton_proof_file_id=file_id,
+            moonton_proof_type=file_type,
+            moonton_status="proof_received",
+            status="awaiting_admin_seller_verify",
+        )
+
+        original.clear_state(user_id)
+
+        admin_markup = InlineKeyboardMarkup(row_width=1)
+        admin_markup.add(
+            InlineKeyboardButton(
+                "✅ အကောင့် / Moonton စစ်ပြီးအတည်ပြုမယ်",
+                callback_data=f"premium_seller_admin_verify_{rid}",
+            )
+        )
+
+        caption = (
+            "🔐 <b>Seller Moonton Change Proof</b>\n\n"
+            f"🆔 SELL-{rid:04d}\n"
+            f"👤 Seller ID — <code>{int(row['user_id'])}</code>\n"
+            f"📝 Account Code — Admin စစ်ဆေးရန်\n\n"
+            "Screenshot ကို စစ်ပြီး အတည်ပြုပါ။"
+        )
+
+        try:
+            if file_type == "photo":
+                bot.send_photo(
+                    ADMIN_ID,
+                    file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=admin_markup,
+                )
+            else:
+                bot.send_document(
+                    ADMIN_ID,
+                    file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=admin_markup,
+                )
+        except Exception:
+            logging.exception(
+                "Seller Moonton proof forwarding failed request=%s",
+                rid,
+            )
+            bot.send_message(
+                ADMIN_ID,
+                caption,
+                parse_mode="HTML",
+                reply_markup=admin_markup,
+            )
+
+        bot.send_message(
+            user_id,
+            "✅ Screenshot ရပါပြီ။ Admin စစ်ဆေးနေပါပြီ။",
+            reply_markup=buyer_features_menu(),
+        )
+
+    def _seller_payout_destination_receive(message):
+        user_id = int(message.from_user.id)
+        state = original.get_state(user_id)
+        if state.get("flow") != "seller_payout_destination":
+            return
+
+        request_id = int(state.get("request_id", 0) or 0)
+        destination = (message.text or "").strip()
+
+        if not destination:
+            msg = bot.send_message(
+                user_id,
+                "❌ ငွေလွှဲနံပါတ် တစ်ခုခု ရိုက်ပို့ပါ။",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(
+                msg,
+                _seller_payout_destination_receive,
+            )
+            return
+
+        row = _seller_request_row(request_id)
+        deal = _seller_deal_row(request_id)
+        if not row or not deal:
+            original.clear_state(user_id)
+            return
+
+        amount = int(deal["admin_offer_price"] or row["price"] or 0)
+
+        _upsert_seller_deal(
+            request_id,
+            user_id,
+            payout_destination=destination,
+            payout_amount=amount,
+            status="awaiting_admin_payout",
+        )
+        original.clear_state(user_id)
+
+        admin_text = (
+            "💸 <b>Seller Payout Request</b>\n\n"
+            f"🆔 SELL-{request_id:04d}\n"
+            f"👤 Seller — <code>{user_id}</code>\n"
+            f"💰 လွှဲရမယ့်ပမာဏ — <b>{amount:,} MMK</b>\n"
+            f"💳 လွှဲရန် နံပါတ် — <code>{_esc(destination)}</code>\n\n"
+            "Admin ငွေလွှဲပြီးရင် ပြေစာကို Seller ဆီပို့ပေးပါ။"
+        )
+
+        bot.send_message(
+            ADMIN_ID,
+            admin_text,
+            parse_mode="HTML",
+        )
+        bot.send_message(
+            user_id,
+            "✅ ငွေလွှဲနံပါတ်ကို Admin ဆီပို့ပြီးပါပြီ။",
+            reply_markup=buyer_features_menu(),
+        )
+
+    def _seller_payout_receipt_receive(message, request_id=None):
+        user_id = int(message.from_user.id)
+        state = original.get_state(user_id)
+        rid = int(
+            request_id
+            if request_id is not None
+            else (state.get("request_id", 0) or 0)
+        )
+
+        # This handler is reserved for a seller-confirmation or admin-sent
+        # payout receipt workflow. It deliberately does not process OTPs.
+        file_id = ""
+        file_type = ""
+
+        if getattr(message, "photo", None):
+            file_id = message.photo[-1].file_id
+            file_type = "photo"
+        elif getattr(message, "document", None):
+            file_id = message.document.file_id
+            file_type = "document"
+
+        if not file_id:
+            return
+
+        row = _seller_request_row(rid)
+        deal = _seller_deal_row(rid)
+        if not row or not deal:
+            return
+
+        _upsert_seller_deal(
+            rid,
+            user_id,
+            payout_receipt_file_id=file_id,
+            payout_receipt_type=file_type,
+            status="awaiting_seller_payout_confirmation",
+        )
+
+        original.clear_state(user_id)
+
+        bot.send_message(
+            user_id,
+            "✅ ငွေလွှဲပြေစာ ရပါပြီ။\n"
+            "အကောင့်ဘက်က ငွေရောက်ပြီဆိုရင် အောက်က "
+            "<b>ငွေရောက်ပါပြီ</b> ကိုနှိပ်ပါ။",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ ငွေရောက်ပါပြီ",
+                        callback_data=f"premium_seller_payout_confirm_{rid}",
+                    )
+                ]
+            ]),
+        )
+
     # ------------------------------------------------------------
     # Reliable callback interception.
     # This is the key fix for generic handler ordering in main.py.
@@ -1480,6 +3139,57 @@ def install(original):
             }
             for update in updates or []:
                 message = getattr(update, "message", None)
+
+                # Robust receipt handler: do not rely on next-step dispatch
+                # alone for photo/document uploads.
+                if message is not None:
+                    state_now = original.get_state(
+                        message.from_user.id
+                    )
+                    flow_now = state_now.get("flow")
+
+                    if flow_now == "buy_receipt":
+                        try:
+                            _buy_receipt_receive(message)
+                        except Exception:
+                            logging.exception(
+                                "Buy receipt flow interception failed"
+                            )
+                            bot.send_message(
+                                message.chat.id,
+                                "❌ ပြေစာကို လက်ခံရာမှာ အမှားရှိနေပါတယ်။ "
+                                "ထပ်ပို့ပေးပါခင်ဗျာ။",
+                                reply_markup=original.back_button(),
+                            )
+                        continue
+
+                    if flow_now == "seller_moonton_proof":
+                        try:
+                            _seller_moonton_proof_receive(message)
+                        except Exception:
+                            logging.exception(
+                                "Seller Moonton proof flow interception failed"
+                            )
+                        continue
+
+                    if flow_now == "seller_payout_destination":
+                        try:
+                            _seller_payout_destination_receive(message)
+                        except Exception:
+                            logging.exception(
+                                "Seller payout destination flow failed"
+                            )
+                        continue
+
+                    if flow_now == "seller_admin_payout_receipt" and message.from_user.id == ADMIN_ID:
+                        try:
+                            _admin_payout_receipt_receive(message)
+                        except Exception:
+                            logging.exception(
+                                "Admin payout receipt flow failed"
+                            )
+                        continue
+
                 if message is not None and (message.text or "") in quick_texts:
                     text_value = (message.text or "").strip()
                     if text_value == "🛒 အကောင့်ဝယ်မယ်":
@@ -1488,8 +3198,9 @@ def install(original):
                             msg = original.bot.send_message(
                                 message.chat.id,
                                 "🛒 <b>အကောင့်ဝယ်မယ်</b>\n\n"
-                                "ဘရားသား ဝယ်ချင်တဲ့ Account ကို Ss ရိုက်ပြပေးပါခင်ဗျာ။\n\n"
-                                "ပြီးရင် Account ရဲ့ Code နာမည်ကို ရိုက်ပို့ပေးပါ။\n"
+                                "ဘရားသား <b>Account Code</b> ကို ရိုက်ပို့ပေးပါခင်ဗျာ။\n\n"
+                                "💡 Code ကို Account Card ရဲ့ အပေါ်ပိုင်းမှာ\n"
+                                "<b>🆔 ACC-003</b> လိုမျိုး တွေ့ရပါမယ်။\n\n"
                                 "ဥပမာ — <code>ACC-003</code>",
                                 parse_mode="HTML",
                                 reply_markup=original.back_button(),
@@ -1535,6 +3246,27 @@ def install(original):
 
                 call = getattr(update, "callback_query", None)
                 if call is not None:
+                    if (call.data or "") == "sell_photos_done":
+                        try:
+                            bot.answer_callback_query(call.id)
+                        except Exception:
+                            pass
+                        try:
+                            if _intercept_sell_photos_done(call):
+                                continue
+                        except Exception:
+                            logging.exception(
+                                "Seller photos done interception failed"
+                            )
+                            try:
+                                bot.send_message(
+                                    call.message.chat.id,
+                                    "❌ Seller flow ဆက်လုပ်ရာမှာ အမှားရှိနေပါတယ်။",
+                                    reply_markup=original.back_button(),
+                                )
+                            except Exception:
+                                pass
+                        continue
                     try:
                         if handle_callback(call):
                             continue
