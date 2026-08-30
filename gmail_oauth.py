@@ -27,7 +27,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
-from flask import Blueprint, redirect, request
+from flask import Blueprint, make_response, redirect, request
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -103,8 +103,13 @@ def _redirect_uri(public_url: str) -> str:
     return public_url.rstrip("/") + CALLBACK_PATH
 
 
-def _flow(public_url: str, state: Optional[str] = None) -> Flow:
+def _flow(
+    public_url: str,
+    state: Optional[str] = None,
+    code_verifier: Optional[str] = None,
+) -> Flow:
     client_path = Path(CLIENT_SECRET_FILE)
+
     if not client_path.is_file():
         raise FileNotFoundError(
             "Google OAuth client secret file not found: "
@@ -115,6 +120,8 @@ def _flow(public_url: str, state: Optional[str] = None) -> Flow:
         str(client_path),
         scopes=SCOPES,
         redirect_uri=_redirect_uri(public_url),
+        code_verifier=code_verifier,
+        autogenerate_code_verifier=False,
     )
 
     if state:
@@ -194,27 +201,35 @@ def _verify_state(state: str, expected_admin_id: int) -> bool:
 def create_authorization_url(
     public_url: str,
     owner_user_id: int,
-) -> str:
+) -> tuple[str, str, str]:
     init_db()
-    state = _make_state(owner_user_id)
-    flow = _flow(public_url, state=state)
 
-    # IMPORTANT:
-    # Pass the signed state explicitly. Setting flow.state alone is not
-    # sufficient because google-auth-oauthlib may generate its own random
-    # state when authorization_url() is called without state=....
-    authorization_url, generated_state = flow.authorization_url(
+    state = _make_state(owner_user_id)
+
+    # PKCE verifier must survive until the OAuth callback. Keep it in a
+    # short-lived HttpOnly browser cookie rather than putting it into the
+    # OAuth state value or the database.
+    code_verifier = secrets.token_urlsafe(64)
+
+    flow = _flow(
+        public_url,
+        state=state,
+        code_verifier=code_verifier,
+    )
+
+    authorization_url, returned_state = flow.authorization_url(
         state=state,
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
     )
 
-    if generated_state != state:
+    if returned_state != state:
         raise RuntimeError(
             "OAuth state mismatch while creating authorization URL."
         )
-    return authorization_url
+
+    return authorization_url, state, code_verifier
 
 
 def _safe_token_path(email: str) -> Path:
@@ -426,16 +441,39 @@ def oauth_start():
         return "Forbidden", 403
 
     try:
-        url = create_authorization_url(
+        url, state, code_verifier = create_authorization_url(
             public_url,
             admin_id,
         )
 
-        logging.info(
-            "GMAIL_OAUTH_START_OK admin_id=%s",
-            admin_id,
+        response = redirect(url)
+
+        response.set_cookie(
+            "gmail_oauth_state",
+            state,
+            max_age=600,
+            secure=True,
+            httponly=True,
+            samesite="Lax",
         )
-        return redirect(url)
+
+        response.set_cookie(
+            "gmail_oauth_code_verifier",
+            code_verifier,
+            max_age=600,
+            secure=True,
+            httponly=True,
+            samesite="Lax",
+        )
+
+        logging.info(
+            "GMAIL_OAUTH_START_OK admin_id=%s state_len=%s verifier_len=%s",
+            admin_id,
+            len(state),
+            len(code_verifier),
+        )
+
+        return response
 
     except Exception as exc:
         logging.exception(
@@ -474,12 +512,6 @@ def oauth_callback():
         )
         return "Missing OAuth state.", 400
 
-    logging.info(
-        "GMAIL_OAUTH_CALLBACK_STATE_RECEIVED state_len=%s state_prefix=%s",
-        len(state),
-        state[:8],
-    )
-
     if not _verify_state(
         state,
         configured_admin,
@@ -513,35 +545,30 @@ def oauth_callback():
         "",
     ).strip()
 
+    code_verifier = request.cookies.get(
+        "gmail_oauth_code_verifier",
+        "",
+    ).strip()
+
+    if not code_verifier:
+        logging.error(
+            "GMAIL_OAUTH_CODE_VERIFIER_MISSING"
+        )
+        return (
+            "Gmail OAuth session expired. "
+            "Please start Gmail connection again from Telegram.",
+            400,
+        )
+
     try:
         flow = _flow(
             public_url,
             state=state,
+            code_verifier=code_verifier,
         )
-
-        logging.info(
-            "GMAIL_OAUTH_CALLBACK_TOKEN_EXCHANGE_START public_url=%s callback_path=%s",
-            public_url,
-            CALLBACK_PATH,
-        )
-
-        # Render terminates HTTPS at its proxy and Flask may see the
-        # internal request scheme as http. oauthlib then rejects request.url
-        # as insecure_transport. Rebuild the callback URL from PUBLIC_URL,
-        # which is the real public HTTPS origin.
-        query_string = request.query_string.decode(
-            "utf-8",
-            errors="replace",
-        )
-        callback_url = (
-            public_url.rstrip("/")
-            + CALLBACK_PATH
-        )
-        if query_string:
-            callback_url += "?" + query_string
 
         flow.fetch_token(
-            authorization_response=callback_url
+            authorization_response=request.url
         )
 
         service = build(
@@ -583,10 +610,17 @@ def oauth_callback():
             email,
         )
 
-        return (
+        response = make_response(
             "Gmail connected successfully. "
             "You may close this page and return to Telegram."
         )
+        response.delete_cookie(
+            "gmail_oauth_state",
+        )
+        response.delete_cookie(
+            "gmail_oauth_code_verifier",
+        )
+        return response
 
     except Exception as exc:
         logging.exception(
