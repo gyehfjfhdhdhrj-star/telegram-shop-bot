@@ -649,18 +649,20 @@ def install(original):
         }
         prev_cb, next_cb = prev_next.get(kind, prev_next["browse"])
 
-        # One full-width button per row. This avoids the cramped 2-column
-        # layout and makes the keyboard visually consistent with the card.
-        m = InlineKeyboardMarkup(row_width=1)
-        m.add(
+        m = InlineKeyboardMarkup(row_width=2)
+        # Exactly two buttons per row. Telegram renders each pair with
+        # matching column widths.
+        m.row(
             InlineKeyboardButton(
-                "⬅️ အရင်Account",
+                "⬅️ အရင် Account",
                 callback_data=prev_cb,
             ),
             InlineKeyboardButton(
                 "နောက် Account ➡️",
                 callback_data=next_cb,
             ),
+        )
+        m.row(
             InlineKeyboardButton(
                 "🔎 အသေးစိတ်ကြည့်မယ်",
                 callback_data=f"premium_account_detail_{acc['id']}",
@@ -669,6 +671,8 @@ def install(original):
                 "❤️ သိမ်းထားမယ်",
                 callback_data=f"premium_fav_toggle_{acc['db_id']}",
             ),
+        )
+        m.row(
             InlineKeyboardButton(
                 "⚡ အမြန်ဝယ်မယ်",
                 callback_data=f"premium_fast_buy_{acc['id']}",
@@ -788,7 +792,43 @@ def install(original):
     # ------------------------------------------------------------
     # Callback implementations
     # ------------------------------------------------------------
+    _callback_dedupe = {}
+    _callback_dedupe_lock = threading.Lock()
+    _CALLBACK_DEDUPE_SECONDS = 2.5
+
+    def _claim_callback(call):
+        key = (
+            int(call.from_user.id),
+            str(call.data or ""),
+            int(getattr(call.message, "message_id", 0) or 0),
+        )
+        now = time.time()
+        with _callback_dedupe_lock:
+            # Keep the structure small.
+            cutoff = now - _CALLBACK_DEDUPE_SECONDS
+            stale = [k for k, ts in _callback_dedupe.items() if ts < cutoff]
+            for k in stale:
+                _callback_dedupe.pop(k, None)
+
+            last = _callback_dedupe.get(key)
+            if last is not None and (now - last) < _CALLBACK_DEDUPE_SECONDS:
+                return False
+
+            _callback_dedupe[key] = now
+            return True
+
     def handle_callback(call):
+        if not _claim_callback(call):
+            try:
+                bot.answer_callback_query(
+                    call.id,
+                    "ခဏစောင့်ပြီး ထပ်နှိပ်ပါ။",
+                    show_alert=False,
+                )
+            except Exception:
+                pass
+            return True
+
         data = call.data or ""
         if data == "home":
             bot.answer_callback_query(call.id)
@@ -855,71 +895,96 @@ def install(original):
                 )
                 return True
 
-            # Full account information from the database.
+            effective_price = int(
+                acc.get("effective_price") or acc.get("price") or 0
+            )
+            original_price = int(acc.get("original_price") or 0)
+
+            # "Special" removed from detail view.
             detail_text = (
                 "🔎 <b>အကောင့်အသေးစိတ်</b>\n\n"
-                f"🏪 <b>Aung Gyi GameShop</b>\n"
+                "🏪 <b>Aung Gyi GameShop</b>\n"
                 f"🆔 Account Code — <b>{html.escape(str(acc['id']))}</b>\n"
                 f"👤 Account Name — <b>{html.escape(str(acc.get('title') or 'ML Account'))}</b>\n"
                 f"✨ Skin — <b>{html.escape(str(acc.get('skins') or 'မဖော်ပြထားပါ'))}</b>\n"
-                f"💰 လက်ရှိဈေး — <b>{int(acc.get('effective_price') or 0):,} MMK</b>\n"
+                f"💰 လက်ရှိဈေး — <b>{effective_price:,} MMK</b>\n"
+                f"🆕 New — <b>{'✅' if acc.get('is_new') else '❌'}</b>\n"
+                f"✅ Status — <b>{html.escape(str(acc.get('status') or 'available'))}</b>\n"
             )
 
-            original_price = int(acc.get("original_price") or 0)
-            effective_price = int(acc.get("effective_price") or 0)
             if original_price and original_price != effective_price:
                 detail_text += (
                     f"💸 မူရင်းဈေး — <s>{original_price:,} MMK</s>\n"
-                    f"🔥 လျော့ဈေး — <b>{effective_price:,} MMK</b>\n"
                 )
 
             detail_text += (
-                f"⭐ Special — <b>{'ဟုတ်ပါတယ်' if acc.get('is_featured') else 'မဟုတ်ပါ'}</b>\n"
-                f"🆕 အသစ်တင်ထားတာ — <b>{'ဟုတ်ပါတယ်' if acc.get('is_new') else 'မဟုတ်ပါ'}</b>\n"
-                f"✅ Status — <b>{html.escape(str(acc.get('status') or 'available'))}</b>\n"
-                "\n📋 <b>အကောင့်အချက်အလက်</b>\n"
+                "\n📋 <b>အကောင့်အချက်အလက်အပြည့်အစုံ</b>\n"
                 "✅ Admin စစ်ဆေးထားပြီး\n"
-                "📸 အကောင့်နဲ့ပတ်သက်တဲ့ သိမ်းထားသော Screenshot များကို အောက်မှာ အပြည့်ပြထားပါတယ်။"
             )
 
             photos = [p for p in (acc.get("photos") or []) if p]
 
-            # Send detail text first, then every stored photo.
-            try:
-                bot.send_message(
-                    call.message.chat.id,
-                    detail_text,
-                    parse_mode="HTML",
-                )
-            except Exception:
-                logging.exception(
-                    "Account detail text send failed: %s",
-                    acc.get("id"),
-                )
+            # Full detail text first.
+            bot.send_message(
+                call.message.chat.id,
+                detail_text,
+                parse_mode="HTML",
+            )
 
-            for idx, photo in enumerate(photos, 1):
-                try:
-                    bot.send_photo(
-                        call.message.chat.id,
-                        photo,
-                        caption=f"📸 Account Code — {html.escape(str(acc['id']))} | ပုံ {idx}/{len(photos)}",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    logging.exception(
-                        "Account detail photo send failed: %s photo=%s",
-                        acc.get("id"),
-                        idx,
+            # All account images in one Telegram media group.
+            if photos:
+                media = []
+                for idx, photo in enumerate(photos, 1):
+                    media.append(
+                        InputMediaPhoto(
+                            photo,
+                            caption=(
+                                f"📸 {html.escape(str(acc['id']))} — "
+                                f"{idx}/{len(photos)}"
+                            ) if idx == 1 else None,
+                            parse_mode="HTML" if idx == 1 else None,
+                        )
                     )
 
-            # Only one menu after a detail view.
+                # Telegram media groups are limited to 10 items per send.
+                for chunk_start in range(0, len(media), 10):
+                    chunk = media[chunk_start:chunk_start + 10]
+                    try:
+                        bot.send_media_group(
+                            call.message.chat.id,
+                            chunk,
+                        )
+                    except Exception:
+                        logging.exception(
+                            "Account detail media group send failed: %s",
+                            acc.get("id"),
+                        )
+                        # Fallback only when media-group API fails.
+                        for item in chunk:
+                            try:
+                                bot.send_photo(
+                                    call.message.chat.id,
+                                    item.media,
+                                )
+                            except Exception:
+                                logging.exception(
+                                    "Account detail fallback photo failed: %s",
+                                    acc.get("id"),
+                                )
+
+            # Only one full-width Home button.
+            home_markup = InlineKeyboardMarkup(row_width=1)
+            home_markup.add(
+                InlineKeyboardButton(
+                    "🏠 ပင်မ Menu",
+                    callback_data="home",
+                )
+            )
             bot.send_message(
                 call.message.chat.id,
                 "🏠 <b>ပင်မ Menu</b>",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
-                ]),
+                reply_markup=home_markup,
             )
             return True
 
@@ -2128,6 +2193,13 @@ def install(original):
         )
 
     def _buy_receipt_receive(message):
+        logging.info(
+            "BUY_RECEIPT_RECEIVED user=%s message_id=%s has_photo=%s has_document=%s",
+            getattr(message.from_user, "id", 0),
+            getattr(message, "message_id", 0),
+            bool(getattr(message, "photo", None)),
+            bool(getattr(message, "document", None)),
+        )
         state = original.get_state(message.from_user.id)
         aid = int(state.get("buy_account_id", 0) or 0)
         price = int(state.get("buy_price", 0) or 0)
@@ -2755,7 +2827,7 @@ def install(original):
         )
         msg = bot.send_message(
             call.message.chat.id,
-            "💰 <b>Seller ကိုပေးမယ့်ဈေး</b> ကို အရင်ရိုက်ပို့ပါ။\n\n"
+            "💰 \"Admin ကို ရောင်းမယ့်ဈေး\" ကို အရင်ရိုက်ပို့ပါ။\n\n"
             "ဥပမာ — <code>100000</code>",
             parse_mode="HTML",
             reply_markup=original.back_button(),
@@ -2859,7 +2931,7 @@ def install(original):
 
         msg = bot.send_message(
             message.chat.id,
-            "📝 Admin ကို ပြောချင်တဲ့ Note ရေးပို့ပါ။\n"
+            "📝 \"ADMIN ကိုပြောချင်တာ\" ရေးပို့ပါ။\n"
             "မရှိရင် <code>မရှိ</code> လို့ ရိုက်ပို့ပါ။",
             parse_mode="HTML",
             reply_markup=original.back_button(),
@@ -3131,6 +3203,7 @@ def install(original):
             )
         )
 
+        delivery_ok = False
         try:
             if file_type == "photo":
                 bot.send_photo(
@@ -3148,17 +3221,34 @@ def install(original):
                     parse_mode="HTML",
                     reply_markup=markup,
                 )
+            delivery_ok = True
         except Exception:
             logging.exception(
-                "Admin payout receipt delivery failed request=%s",
+                "Admin payout receipt delivery failed request=%s seller=%s",
                 request_id,
-            )
-            bot.send_message(
                 seller_id,
-                text_out,
-                parse_mode="HTML",
-                reply_markup=markup,
             )
+            try:
+                bot.send_message(
+                    seller_id,
+                    text_out,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+                delivery_ok = True
+            except Exception:
+                logging.exception(
+                    "Admin payout receipt text fallback failed request=%s seller=%s",
+                    request_id,
+                    seller_id,
+                )
+
+        logging.info(
+            "ADMIN_PAYOUT_RECEIPT_DELIVERY request=%s seller=%s ok=%s",
+            request_id,
+            seller_id,
+            delivery_ok,
+        )
 
         bot.send_message(
             ADMIN_ID,
