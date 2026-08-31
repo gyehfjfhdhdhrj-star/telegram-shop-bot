@@ -890,7 +890,20 @@ def install(original):
         if data.startswith("premium_account_detail_"):
             bot.answer_callback_query(call.id)
             account_id = data.replace("premium_account_detail_", "", 1)
-            acc = account_by_text(account_id)
+
+            # Resolve from the exact available-account collection used by
+            # Browse. This preserves the stored `photos` list reliably.
+            acc = None
+            try:
+                for candidate in original.get_available_accounts():
+                    if str(candidate.get("id", "")).strip().upper() == str(account_id).strip().upper():
+                        acc = candidate
+                        break
+            except Exception:
+                logging.exception(
+                    "Available-account detail lookup failed: %s",
+                    account_id,
+                )
 
             if not acc:
                 bot.send_message(
@@ -938,46 +951,85 @@ def install(original):
                 parse_mode="HTML",
             )
 
-            # All account images in one Telegram media group.
+            # All account images in Telegram media groups.
             if photos:
-                media = []
-                for idx, photo in enumerate(photos, 1):
-                    media.append(
-                        InputMediaPhoto(
-                            photo,
-                            caption=(
-                                f"📸 {html.escape(str(acc['id']))} — "
-                                f"{idx}/{len(photos)}"
-                            ) if idx == 1 else None,
-                            parse_mode="HTML" if idx == 1 else None,
-                        )
-                    )
+                logging.info(
+                    "ACCOUNT_DETAIL_PHOTOS account=%s count=%s",
+                    acc.get("id"),
+                    len(photos),
+                )
 
-                # Telegram media groups are limited to 10 items per send.
-                for chunk_start in range(0, len(media), 10):
-                    chunk = media[chunk_start:chunk_start + 10]
+                for chunk_start in range(0, len(photos), 10):
+                    chunk_photos = photos[chunk_start:chunk_start + 10]
+                    media = []
+
+                    for idx, photo in enumerate(chunk_photos, chunk_start + 1):
+                        try:
+                            if idx == 1:
+                                media.append(
+                                    InputMediaPhoto(
+                                        photo,
+                                        caption=(
+                                            f"📸 {html.escape(str(acc['id']))}\n"
+                                            f"ပုံ {idx}/{len(photos)}"
+                                        ),
+                                        parse_mode="HTML",
+                                    )
+                                )
+                            else:
+                                media.append(InputMediaPhoto(photo))
+                        except Exception:
+                            logging.exception(
+                                "ACCOUNT_DETAIL_MEDIA_BUILD_FAILED account=%s photo=%s",
+                                acc.get("id"),
+                                idx,
+                            )
+
+                    if not media:
+                        continue
+
                     try:
                         bot.send_media_group(
                             call.message.chat.id,
-                            chunk,
+                            media,
+                        )
+                        logging.info(
+                            "ACCOUNT_DETAIL_MEDIA_GROUP_OK account=%s start=%s count=%s",
+                            acc.get("id"),
+                            chunk_start + 1,
+                            len(media),
                         )
                     except Exception:
                         logging.exception(
-                            "Account detail media group send failed: %s",
+                            "ACCOUNT_DETAIL_MEDIA_GROUP_FAILED account=%s start=%s count=%s",
                             acc.get("id"),
+                            chunk_start + 1,
+                            len(media),
                         )
-                        # Fallback only when media-group API fails.
-                        for item in chunk:
+
+                        # Reliable fallback: send the same photos individually.
+                        for idx, photo in enumerate(chunk_photos, chunk_start + 1):
                             try:
                                 bot.send_photo(
                                     call.message.chat.id,
-                                    item.media,
+                                    photo,
+                                    caption=(
+                                        f"📸 {html.escape(str(acc['id']))} — "
+                                        f"ပုံ {idx}/{len(photos)}"
+                                    ),
+                                    parse_mode="HTML",
                                 )
                             except Exception:
                                 logging.exception(
-                                    "Account detail fallback photo failed: %s",
+                                    "ACCOUNT_DETAIL_PHOTO_FALLBACK_FAILED account=%s photo=%s",
                                     acc.get("id"),
+                                    idx,
                                 )
+            else:
+                logging.warning(
+                    "ACCOUNT_DETAIL_NO_PHOTOS account=%s",
+                    acc.get("id"),
+                )
 
             # Only one full-width Home button.
             home_markup = InlineKeyboardMarkup(row_width=1)
@@ -3543,6 +3595,40 @@ def install(original):
             }
             for update in updates or []:
                 message = getattr(update, "message", None)
+
+                # FINAL /start interception: never pass /start to an older
+                # interceptor, because older versions used zero-width carrier
+                # messages for menus.
+                if message is not None and (getattr(message, "text", None) or "").strip() == "/start":
+                    try:
+                        original.clear_state(message.from_user.id)
+                        original.log_user_activity(message.from_user, "start")
+                    except Exception:
+                        pass
+
+                    try:
+                        bot.send_message(
+                            message.chat.id,
+                            "🏠 <b>Aung Gyi GameShop</b>\n"
+                            "အောက်က Menu ကနေ လိုတာကို ရွေးပြီး စတင်အသုံးပြုနိုင်ပါတယ်။",
+                            parse_mode="HTML",
+                            reply_markup=_reply_keyboard_markup(
+                                message.from_user.id,
+                                message.from_user.id == ADMIN_ID,
+                            ),
+                        )
+                        bot.send_message(
+                            message.chat.id,
+                            "📌 <b>ဝန်ဆောင်မှု Menu</b>",
+                            parse_mode="HTML",
+                            reply_markup=_inline_compact_main_menu(
+                                message.from_user.id,
+                                original,
+                            ),
+                        )
+                    except Exception:
+                        logging.exception("Final /start menu send failed")
+                    continue
 
                 # Robust receipt handler: do not rely on next-step dispatch
                 # alone for photo/document uploads.
