@@ -2262,11 +2262,9 @@ def install(original):
     def _start_seller_expected_price(message):
         user_id = int(message.from_user.id)
         state = original.get_state(user_id)
-        logging.info(
-            "Seller expected-price handler fired user_id=%s flow=%r text=%r",
-            user_id,
-            state.get("flow"),
-            (message.text or "")[:200],
+        print(
+            f"[SELLER_PRICE] handler fired user_id={user_id} flow={state.get('flow')!r} text={(message.text or '')[:200]!r}",
+            flush=True,
         )
         if state.get("flow") != "seller_expected_price":
             return
@@ -2309,14 +2307,19 @@ def install(original):
 
     def _finish_seller_submission(message):
         user_id = int(message.from_user.id)
-        logging.info(
-            "Seller note handler fired user_id=%s text=%r",
-            user_id,
-            (message.text or "")[:200],
+        print(
+            f"[SELLER_NOTE] handler fired user_id={user_id} text={(message.text or '')[:200]!r}",
+            flush=True,
         )
         try:
             _finish_seller_submission_inner(message, user_id)
         except Exception:
+            import traceback
+            print(
+                f"[SELLER_NOTE] submission FAILED user_id={user_id}",
+                flush=True,
+            )
+            traceback.print_exc()
             logging.exception(
                 "Seller note submission failed user_id=%s", user_id
             )
@@ -2328,6 +2331,7 @@ def install(original):
                     reply_markup=original.back_button(),
                 )
             except Exception:
+                traceback.print_exc()
                 logging.exception(
                     "Seller note failure reply also failed user_id=%s",
                     user_id,
