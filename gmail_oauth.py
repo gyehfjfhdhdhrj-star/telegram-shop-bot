@@ -236,7 +236,7 @@ def create_authorization_url(
         state=state,
         access_type="offline",
         include_granted_scopes="true",
-        prompt="consent",
+        prompt="select_account consent",
     )
 
     if returned_state != state:
