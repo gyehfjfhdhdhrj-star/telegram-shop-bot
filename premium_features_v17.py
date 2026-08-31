@@ -42,12 +42,6 @@ from urllib.parse import quote
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
-print(
-    "[PREMIUM_FEATURES_DEBUG_BUILD] premium_features_v21_gmail_button.py "
-    "MODULE LOADED - if you see this after redeploy, the new file IS live",
-    flush=True,
-)
-
 _INSTALLED = False
 
 
@@ -271,12 +265,9 @@ def _install_reply_keyboard_layer(original):
 def install(original):
     """Install the addon onto the already-loaded main.py module."""
     global _INSTALLED
-    print("[PREMIUM_FEATURES_DEBUG_BUILD] install() called", flush=True)
     if _INSTALLED:
-        print("[PREMIUM_FEATURES_DEBUG_BUILD] install() skipped - already installed", flush=True)
         return
     _INSTALLED = True
-    print("[PREMIUM_FEATURES_DEBUG_BUILD] install() proceeding, _INSTALLED set True", flush=True)
 
     bot = original.bot
     ADMIN_ID = int(original.ADMIN_ID)
@@ -2271,10 +2262,6 @@ def install(original):
     def _start_seller_expected_price(message):
         user_id = int(message.from_user.id)
         state = original.get_state(user_id)
-        print(
-            f"[SELLER_PRICE] handler fired user_id={user_id} flow={state.get('flow')!r} text={(message.text or '')[:200]!r}",
-            flush=True,
-        )
         if state.get("flow") != "seller_expected_price":
             return
 
@@ -2304,8 +2291,8 @@ def install(original):
 
         msg = bot.send_message(
             message.chat.id,
-            "📝 Seller Note ထည့်ချင်ရင် ဒီမှာ ရိုက်ပို့ပါ။\n"
-            "မထည့်ချင်ရင် <code>မရှိ</code> လို့ ရိုက်ပို့လို့ရပါတယ်။",
+            "📝 ADMIN ကိုပြောချင်တာကို ရှိရင် ဒီအောက်မှာရိုက်ပါ။\n"
+            "ပြောစရာမရှိရင် <code>မရှိ</code> လို ရိုက်ပို့လိုရပါတယ်။",
             parse_mode="HTML",
             reply_markup=original.back_button(),
         )
@@ -2316,49 +2303,22 @@ def install(original):
 
     def _finish_seller_submission(message):
         user_id = int(message.from_user.id)
-        print(
-            f"[SELLER_NOTE] handler fired user_id={user_id} text={(message.text or '')[:200]!r}",
-            flush=True,
-        )
-        try:
-            _finish_seller_submission_inner(message, user_id)
-        except Exception:
-            import traceback
-            print(
-                f"[SELLER_NOTE] submission FAILED user_id={user_id}",
-                flush=True,
-            )
-            traceback.print_exc()
-            logging.exception(
-                "Seller note submission failed user_id=%s", user_id
-            )
-            try:
-                bot.send_message(
-                    message.chat.id,
-                    "❌ Seller Request ပို့ရာမှာ အမှားရှိနေပါတယ်။ "
-                    "ထပ်ကြိုးစားကြည့်ပါ (💰 အကောင့်ရောင်းမယ် ကနေ အသစ်စပါ)။",
-                    reply_markup=original.back_button(),
-                )
-            except Exception:
-                traceback.print_exc()
-                logging.exception(
-                    "Seller note failure reply also failed user_id=%s",
-                    user_id,
-                )
-            original.clear_state(user_id)
-
-    def _finish_seller_submission_inner(message, user_id):
         state = original.get_state(user_id)
         if state.get("flow") != "seller_note":
-            logging.info(
-                "Seller note handler exited early: flow was %r, not 'seller_note' (user_id=%s)",
-                state.get("flow"),
-                user_id,
-            )
             return
 
         note_raw = (message.text or "").strip()
-        note = "" if note_raw in {"မရှိ", "-", "မထည့်ဘူး", "none"} else note_raw
+        if not note_raw:
+            msg = bot.send_message(
+                message.chat.id,
+                "📝 ADMIN ကိုပြောချင်တာကို ရှိရင် ဒီအောက်မှာရိုက်ပါ။\n"
+                "ပြောစရာမရှိရင် <code>မရှိ</code> လို ရိုက်ပို့လိုရပါတယ်။",
+                parse_mode="HTML",
+                reply_markup=original.back_button(),
+            )
+            bot.register_next_step_handler(msg, _finish_seller_submission)
+            return
+        note = "" if note_raw.lower() in {"မရှိ", "-", "မထည့်ဘူး", "none"} else note_raw
         expected = int(state.get("seller_expected_price", 0) or 0)
         photos = [p for p in (state.get("photos") or []) if p][:15]
 
@@ -3223,35 +3183,75 @@ def install(original):
                         continue
 
                     if flow_now == "seller_expected_price":
-                        print(
-                            f"[SELLER_PRICE] direct-intercepted user_id={message.from_user.id} "
-                            f"text={(message.text or '')[:200]!r}",
-                            flush=True,
-                        )
                         try:
                             _start_seller_expected_price(message)
                         except Exception:
-                            import traceback
-                            traceback.print_exc()
                             logging.exception(
-                                "Seller expected price flow interception failed"
+                                "Seller expected price flow failed"
                             )
+                            try:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "❌ Seller ကိုပေးမယ့်ဈေး လက်ခံရာမှာ အမှားရှိနေပါတယ်။ "
+                                    "ထပ်ရိုက်ပို့ပေးပါခင်ဗျာ။",
+                                    reply_markup=original.back_button(),
+                                )
+                            except Exception:
+                                pass
                         continue
 
                     if flow_now == "seller_note":
-                        print(
-                            f"[SELLER_NOTE] direct-intercepted user_id={message.from_user.id} "
-                            f"text={(message.text or '')[:200]!r}",
-                            flush=True,
-                        )
                         try:
                             _finish_seller_submission(message)
                         except Exception:
-                            import traceback
-                            traceback.print_exc()
                             logging.exception(
-                                "Seller note flow interception failed"
+                                "Seller Note flow failed"
                             )
+                            try:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "❌ ADMIN ကိုပြောချင်တဲ့စာ လက်ခံရာမှာ အမှားရှိနေပါတယ်။ "
+                                    "ထပ်ပို့ပေးပါခင်ဗျာ။",
+                                    reply_markup=original.back_button(),
+                                )
+                            except Exception:
+                                pass
+                        continue
+
+                    if flow_now == "seller_negotiate_price":
+                        try:
+                            _seller_negotiate_price(message)
+                        except Exception:
+                            logging.exception(
+                                "Seller negotiate price flow failed"
+                            )
+                            try:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "❌ စျေးထပ်ညှိရာမှာ အမှားရှိနေပါတယ်။ "
+                                    "ထပ်ရိုက်ပို့ပေးပါခင်ဗျာ။",
+                                    reply_markup=original.back_button(),
+                                )
+                            except Exception:
+                                pass
+                        continue
+
+                    if flow_now == "seller_negotiate_note":
+                        try:
+                            _seller_negotiate_note(message)
+                        except Exception:
+                            logging.exception(
+                                "Seller negotiate note flow failed"
+                            )
+                            try:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "❌ ADMIN ကိုပို့မယ့် Note လက်ခံရာမှာ အမှားရှိနေပါတယ်။ "
+                                    "ထပ်ပို့ပေးပါခင်ဗျာ။",
+                                    reply_markup=original.back_button(),
+                                )
+                            except Exception:
+                                pass
                         continue
 
                     if flow_now == "seller_payout_destination":
@@ -3261,6 +3261,15 @@ def install(original):
                             logging.exception(
                                 "Seller payout destination flow failed"
                             )
+                            try:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "❌ ငွေလွှဲနံပါတ် လက်ခံရာမှာ အမှားရှိနေပါတယ်။ "
+                                    "ထပ်ပို့ပေးပါခင်ဗျာ။",
+                                    reply_markup=original.back_button(),
+                                )
+                            except Exception:
+                                pass
                         continue
 
                     if flow_now == "seller_admin_payout_receipt" and message.from_user.id == ADMIN_ID:
