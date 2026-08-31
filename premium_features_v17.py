@@ -648,49 +648,101 @@ def install(original):
             "verified": ("premium_ver_prev", "premium_ver_next"),
         }
         prev_cb, next_cb = prev_next.get(kind, prev_next["browse"])
-        m = InlineKeyboardMarkup(row_width=2)
-        m.row(
-            InlineKeyboardButton("⬅️ အရင်Account", callback_data=prev_cb),
-            InlineKeyboardButton("နောက် Account ➡️", callback_data=next_cb),
+
+        # One full-width button per row. This avoids the cramped 2-column
+        # layout and makes the keyboard visually consistent with the card.
+        m = InlineKeyboardMarkup(row_width=1)
+        m.add(
+            InlineKeyboardButton(
+                "⬅️ အရင်Account",
+                callback_data=prev_cb,
+            ),
+            InlineKeyboardButton(
+                "နောက် Account ➡️",
+                callback_data=next_cb,
+            ),
+            InlineKeyboardButton(
+                "🔎 အသေးစိတ်ကြည့်မယ်",
+                callback_data=f"premium_account_detail_{acc['id']}",
+            ),
+            InlineKeyboardButton(
+                "❤️ သိမ်းထားမယ်",
+                callback_data=f"premium_fav_toggle_{acc['db_id']}",
+            ),
+            InlineKeyboardButton(
+                "⚡ အမြန်ဝယ်မယ်",
+                callback_data=f"premium_fast_buy_{acc['id']}",
+            ),
+            InlineKeyboardButton(
+                "🏠 ပင်မ Menu",
+                callback_data="home",
+            ),
         )
-        m.row(
-            InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
-            InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
-        )
-        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
         return m
 
     def send_account_card(chat_id, acc, kind, index, total):
         if not acc:
-            bot.send_message(chat_id, "❌ ဒီအကောင့် မရှိတော့ပါ။", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]))
+            bot.send_message(
+                chat_id,
+                "❌ ဒီအကောင့် မရှိတော့ပါ။",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]
+                ),
+            )
             return
-        photos = [p for p in (acc.get("photos") or []) if p][:15]
-        caption = f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n{format_account_wrapped(acc)}"
-        prev_map={"browse":"premium_browse_prev","search":"premium_search_prev","favorites":"premium_fav_prev","new":"premium_new_prev","verified":"premium_ver_prev"}
-        next_map={"browse":"premium_browse_next","search":"premium_search_next","favorites":"premium_fav_next","new":"premium_new_next","verified":"premium_ver_next"}
-        nav=InlineKeyboardMarkup(row_width=2)
-        nav.row(InlineKeyboardButton("⬅️ အရင်Account", callback_data=prev_map.get(kind,"premium_browse_prev")), InlineKeyboardButton("နောက် Account ➡️", callback_data=next_map.get(kind,"premium_browse_next")))
-        nav.row(InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"), InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"))
-        nav.row(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+
+        photos = [p for p in (acc.get("photos") or []) if p][:3]
+        nav = account_nav_markup(kind, acc)
+
+        # Send each photo separately. The keyboard belongs to the 3rd
+        # photo so Telegram shows the buttons directly below the images,
+        # without a separate blank/zero-width message.
         if photos:
-            try:
-                from telebot.types import InputMediaPhoto
-                media=[InputMediaPhoto(p, caption=caption, parse_mode="HTML") if i==0 else InputMediaPhoto(p) for i,p in enumerate(photos)]
-                bot.send_media_group(chat_id, media)
-                # Media groups cannot have inline keyboards. Send only the controls with no extra prose.
-                bot.send_message(chat_id, "⁣", reply_markup=nav)
-                return
-            except Exception:
-                logging.exception("Account media group failed: %s", acc.get("id"))
-            try:
-                bot.send_photo(chat_id, photos[0], caption=caption, parse_mode="HTML", reply_markup=nav)
-                for p in photos[1:]:
-                    try: bot.send_photo(chat_id,p)
-                    except Exception: pass
-                return
-            except Exception:
-                logging.exception("Account photo+caption fallback failed: %s", acc.get("id"))
-        bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=nav)
+            for i, photo in enumerate(photos):
+                try:
+                    caption = ""
+                    markup = None
+
+                    if i == len(photos) - 1:
+                        caption = (
+                            f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
+                            + format_account_wrapped(acc)
+                        )
+                        markup = nav
+
+                    bot.send_photo(
+                        chat_id,
+                        photo,
+                        caption=caption,
+                        parse_mode="HTML" if caption else None,
+                        reply_markup=markup,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Account photo send failed: %s photo_index=%s",
+                        acc.get("id"),
+                        i + 1,
+                    )
+
+            # If all photo sends failed, keep a reliable text fallback.
+            # Do NOT send a blank message.
+            if not photos:
+                bot.send_message(
+                    chat_id,
+                    f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
+                    + format_account_wrapped(acc),
+                    parse_mode="HTML",
+                    reply_markup=nav,
+                )
+            return
+
+        bot.send_message(
+            chat_id,
+            f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
+            + format_account_wrapped(acc),
+            parse_mode="HTML",
+            reply_markup=nav,
+        )
 
     # ------------------------------------------------------------
     # State helpers
@@ -746,7 +798,8 @@ def install(original):
                 pass
             bot.send_message(
                 call.message.chat.id,
-                "⁣",
+                "🏠 <b>Aung Gyi GameShop</b>",
+                parse_mode="HTML",
                 reply_markup=_inline_compact_main_menu(call.from_user.id, original),
             )
             return True
@@ -755,8 +808,11 @@ def install(original):
             bot.answer_callback_query(call.id)
             bot.send_message(
                 call.message.chat.id,
-                "⁣",
-                reply_markup=_inline_compact_main_menu(call.from_user.id, original),
+                "🏠 <b>Aung Gyi GameShop</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                ]),
             )
             return True
 
@@ -781,6 +837,89 @@ def install(original):
                 f"🔔 အသစ်တင်အသိပေးချက် — <b>{alert}</b>",
                 parse_mode="HTML",
                 reply_markup=m,
+            )
+            return True
+
+        if data.startswith("premium_account_detail_"):
+            bot.answer_callback_query(call.id)
+            account_id = data.replace("premium_account_detail_", "", 1)
+            acc = account_by_text(account_id)
+
+            if not acc:
+                bot.send_message(
+                    call.message.chat.id,
+                    "❌ Account မတွေ့ပါ။",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                    ]),
+                )
+                return True
+
+            # Full account information from the database.
+            detail_text = (
+                "🔎 <b>အကောင့်အသေးစိတ်</b>\n\n"
+                f"🏪 <b>Aung Gyi GameShop</b>\n"
+                f"🆔 Account Code — <b>{html.escape(str(acc['id']))}</b>\n"
+                f"👤 Account Name — <b>{html.escape(str(acc.get('title') or 'ML Account'))}</b>\n"
+                f"✨ Skin — <b>{html.escape(str(acc.get('skins') or 'မဖော်ပြထားပါ'))}</b>\n"
+                f"💰 လက်ရှိဈေး — <b>{int(acc.get('effective_price') or 0):,} MMK</b>\n"
+            )
+
+            original_price = int(acc.get("original_price") or 0)
+            effective_price = int(acc.get("effective_price") or 0)
+            if original_price and original_price != effective_price:
+                detail_text += (
+                    f"💸 မူရင်းဈေး — <s>{original_price:,} MMK</s>\n"
+                    f"🔥 လျော့ဈေး — <b>{effective_price:,} MMK</b>\n"
+                )
+
+            detail_text += (
+                f"⭐ Special — <b>{'ဟုတ်ပါတယ်' if acc.get('is_featured') else 'မဟုတ်ပါ'}</b>\n"
+                f"🆕 အသစ်တင်ထားတာ — <b>{'ဟုတ်ပါတယ်' if acc.get('is_new') else 'မဟုတ်ပါ'}</b>\n"
+                f"✅ Status — <b>{html.escape(str(acc.get('status') or 'available'))}</b>\n"
+                "\n📋 <b>အကောင့်အချက်အလက်</b>\n"
+                "✅ Admin စစ်ဆေးထားပြီး\n"
+                "📸 အကောင့်နဲ့ပတ်သက်တဲ့ သိမ်းထားသော Screenshot များကို အောက်မှာ အပြည့်ပြထားပါတယ်။"
+            )
+
+            photos = [p for p in (acc.get("photos") or []) if p]
+
+            # Send detail text first, then every stored photo.
+            try:
+                bot.send_message(
+                    call.message.chat.id,
+                    detail_text,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logging.exception(
+                    "Account detail text send failed: %s",
+                    acc.get("id"),
+                )
+
+            for idx, photo in enumerate(photos, 1):
+                try:
+                    bot.send_photo(
+                        call.message.chat.id,
+                        photo,
+                        caption=f"📸 Account Code — {html.escape(str(acc['id']))} | ပုံ {idx}/{len(photos)}",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logging.exception(
+                        "Account detail photo send failed: %s photo=%s",
+                        acc.get("id"),
+                        idx,
+                    )
+
+            # Only one menu after a detail view.
+            bot.send_message(
+                call.message.chat.id,
+                "🏠 <b>ပင်မ Menu</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                ]),
             )
             return True
 
@@ -3518,19 +3657,9 @@ def install(original):
                 """)
                 max_id = max((int(r["id"]) for r in current), default=last_account_id)
                 if max_id > last_account_id:
-                    new_rows = [r for r in current if int(r["id"]) > last_account_id]
-                    users = rows("SELECT user_id FROM premium_user_settings WHERE new_account_alert=1")
-                    for r in new_rows:
-                        acc = account_by_number(int(r["id"]))
-                        if not acc:
-                            continue
-                        for u in users:
-                            try:
-                                m = InlineKeyboardMarkup(row_width=1)
-                                m.add(InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"))
-                                bot.send_message(int(u["user_id"]), "🆕 <b>Account အသစ်တင်ထားပါတယ်!</b>\n\n" + format_account_wrapped(acc), parse_mode="HTML", reply_markup=m)
-                            except Exception:
-                                logging.exception("New account notification failed")
+                    # Intentionally do not push a message to users whenever
+                    # an account is created/updated. Users can open
+                    # "အသစ်တင်ထားတဲ့အကောင့်များ" manually.
                     last_account_id = max_id
 
                 current_prices = {int(r["id"]): int(r["p"] or 0) for r in current}
