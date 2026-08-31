@@ -1982,6 +1982,54 @@ def install(original):
     # ------------------------------------------------------------
     # Seller negotiation / handoff flow
     # ------------------------------------------------------------
+    def _ensure_seller_deals_table():
+        """Ensure the seller-deal table exists on the SAME DB connection
+        used by rows()/db_connect(). This is intentionally idempotent.
+        """
+        with db_lock:
+            with closing(db_connect()) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS premium_seller_deals (
+                        request_id INTEGER PRIMARY KEY,
+                        seller_user_id INTEGER NOT NULL,
+                        seller_expected_price INTEGER NOT NULL DEFAULT 0,
+                        seller_note TEXT NOT NULL DEFAULT '',
+                        admin_offer_price INTEGER NOT NULL DEFAULT 0,
+                        negotiation_count INTEGER NOT NULL DEFAULT 0,
+                        moonton_changeable TEXT NOT NULL DEFAULT '',
+                        gmail_mailbox_id INTEGER NOT NULL DEFAULT 0,
+                        gmail_email TEXT NOT NULL DEFAULT '',
+                        moonton_status TEXT NOT NULL DEFAULT 'not_started',
+                        moonton_proof_file_id TEXT NOT NULL DEFAULT '',
+                        moonton_proof_type TEXT NOT NULL DEFAULT '',
+                        admin_verified INTEGER NOT NULL DEFAULT 0,
+                        payout_destination TEXT NOT NULL DEFAULT '',
+                        payout_amount INTEGER NOT NULL DEFAULT 0,
+                        payout_receipt_file_id TEXT NOT NULL DEFAULT '',
+                        payout_receipt_type TEXT NOT NULL DEFAULT '',
+                        seller_payout_confirmed INTEGER NOT NULL DEFAULT 0,
+                        final_account_id INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'awaiting_admin_price',
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_premium_seller_deals_seller
+                    ON premium_seller_deals(seller_user_id)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_premium_seller_deals_status
+                    ON premium_seller_deals(status)
+                    """
+                )
+                conn.commit()
+
     def _upsert_seller_deal(
         request_id,
         seller_user_id,
@@ -2004,6 +2052,10 @@ def install(original):
         seller_payout_confirmed=None,
         final_account_id=None,
     ):
+        # Defensive schema repair: this prevents a swallowed startup migration
+        # from breaking the first Seller Note submission.
+        _ensure_seller_deals_table()
+
         existing = rows(
             "SELECT * FROM premium_seller_deals WHERE request_id=?",
             (int(request_id),),
@@ -2308,17 +2360,7 @@ def install(original):
             return
 
         note_raw = (message.text or "").strip()
-        if not note_raw:
-            msg = bot.send_message(
-                message.chat.id,
-                "📝 ADMIN ကိုပြောချင်တာကို ရှိရင် ဒီအောက်မှာရိုက်ပါ။\n"
-                "ပြောစရာမရှိရင် <code>မရှိ</code> လို ရိုက်ပို့လိုရပါတယ်။",
-                parse_mode="HTML",
-                reply_markup=original.back_button(),
-            )
-            bot.register_next_step_handler(msg, _finish_seller_submission)
-            return
-        note = "" if note_raw.lower() in {"မရှိ", "-", "မထည့်ဘူး", "none"} else note_raw
+        note = "" if note_raw in {"မရှိ", "-", "မထည့်ဘူး", "none"} else note_raw
         expected = int(state.get("seller_expected_price", 0) or 0)
         photos = [p for p in (state.get("photos") or []) if p][:15]
 
@@ -2403,6 +2445,14 @@ def install(original):
             f"💰 Seller လိုချင်တဲ့ဈေး — <b>{expected:,} MMK</b>\n"
             f"📝 Seller Note — <b>{_esc(note or 'မရှိ')}</b>\n\n"
             "ပုံတွေစစ်ပြီး Admin က စျေးပြန်ပေးပါ။"
+        )
+
+        logging.info(
+            "SELLER_REQUEST_SAVED request=%s seller=%s expected_price=%s note_len=%s",
+            request_id,
+            user_id,
+            expected,
+            len(note),
         )
 
         try:
@@ -3186,9 +3236,7 @@ def install(original):
                         try:
                             _start_seller_expected_price(message)
                         except Exception:
-                            logging.exception(
-                                "Seller expected price flow failed"
-                            )
+                            logging.exception("Seller expected price flow failed")
                             try:
                                 bot.send_message(
                                     message.chat.id,
@@ -3204,9 +3252,7 @@ def install(original):
                         try:
                             _finish_seller_submission(message)
                         except Exception:
-                            logging.exception(
-                                "Seller Note flow failed"
-                            )
+                            logging.exception("Seller Note flow failed")
                             try:
                                 bot.send_message(
                                     message.chat.id,
@@ -3222,36 +3268,14 @@ def install(original):
                         try:
                             _seller_negotiate_price(message)
                         except Exception:
-                            logging.exception(
-                                "Seller negotiate price flow failed"
-                            )
-                            try:
-                                bot.send_message(
-                                    message.chat.id,
-                                    "❌ စျေးထပ်ညှိရာမှာ အမှားရှိနေပါတယ်။ "
-                                    "ထပ်ရိုက်ပို့ပေးပါခင်ဗျာ။",
-                                    reply_markup=original.back_button(),
-                                )
-                            except Exception:
-                                pass
+                            logging.exception("Seller negotiate price flow failed")
                         continue
 
                     if flow_now == "seller_negotiate_note":
                         try:
                             _seller_negotiate_note(message)
                         except Exception:
-                            logging.exception(
-                                "Seller negotiate note flow failed"
-                            )
-                            try:
-                                bot.send_message(
-                                    message.chat.id,
-                                    "❌ ADMIN ကိုပို့မယ့် Note လက်ခံရာမှာ အမှားရှိနေပါတယ်။ "
-                                    "ထပ်ပို့ပေးပါခင်ဗျာ။",
-                                    reply_markup=original.back_button(),
-                                )
-                            except Exception:
-                                pass
+                            logging.exception("Seller negotiate note flow failed")
                         continue
 
                     if flow_now == "seller_payout_destination":
@@ -3261,15 +3285,6 @@ def install(original):
                             logging.exception(
                                 "Seller payout destination flow failed"
                             )
-                            try:
-                                bot.send_message(
-                                    message.chat.id,
-                                    "❌ ငွေလွှဲနံပါတ် လက်ခံရာမှာ အမှားရှိနေပါတယ်။ "
-                                    "ထပ်ပို့ပေးပါခင်ဗျာ။",
-                                    reply_markup=original.back_button(),
-                                )
-                            except Exception:
-                                pass
                         continue
 
                     if flow_now == "seller_admin_payout_receipt" and message.from_user.id == ADMIN_ID:
@@ -3448,6 +3463,8 @@ def install(original):
 
     try:
         init_feature_db()
+        _ensure_seller_deals_table()
+        logging.info("SELLER_DEALS_SCHEMA_OK")
     except Exception:
         logging.exception("Premium feature schema initialization failed before monitor start")
 
