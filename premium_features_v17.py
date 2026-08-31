@@ -295,6 +295,33 @@ def install(original):
                         "ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0"
                     )
 
+                # Seller request columns are migrated once at feature install
+                # time, not during a live seller message. This prevents the
+                # first Seller Note from failing because of an ALTER TABLE
+                # race or schema error. main.py remains the owner of the
+                # seller_requests table itself.
+                seller_table = conn.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='seller_requests'"
+                ).fetchone()
+                if seller_table:
+                    seller_cols = {
+                        r["name"]
+                        for r in conn.execute(
+                            "PRAGMA table_info(seller_requests)"
+                        ).fetchall()
+                    }
+                    if "seller_note" not in seller_cols:
+                        conn.execute(
+                            "ALTER TABLE seller_requests "
+                            "ADD COLUMN seller_note TEXT NOT NULL DEFAULT ''"
+                        )
+                    if "seller_expected_price" not in seller_cols:
+                        conn.execute(
+                            "ALTER TABLE seller_requests "
+                            "ADD COLUMN seller_expected_price INTEGER NOT NULL DEFAULT 0"
+                        )
+
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS premium_favorites (
                         user_id INTEGER NOT NULL,
@@ -2291,8 +2318,8 @@ def install(original):
 
         msg = bot.send_message(
             message.chat.id,
-            "📝 Seller Note ထည့်ချင်ရင် ဒီမှာ ရိုက်ပို့ပါ။\n"
-            "မထည့်ချင်ရင် <code>မရှိ</code> လို့ ရိုက်ပို့လို့ရပါတယ်။",
+            "📝 <b>ADMIN ကိုပြောချင်တာရှိရင် ဒီအောက်မှာ ရိုက်ပို့ပါ။</b>\n"
+            "ပြောစရာမရှိရင် <code>မရှိ</code> လို့ ရိုက်ပို့လို့ရပါတယ်။",
             parse_mode="HTML",
             reply_markup=original.back_button(),
         )
@@ -2343,22 +2370,6 @@ def install(original):
                 )
                 request_id = int(cur.lastrowid)
 
-                columns = {
-                    r["name"]
-                    for r in conn.execute(
-                        "PRAGMA table_info(seller_requests)"
-                    ).fetchall()
-                }
-                if "seller_note" not in columns:
-                    conn.execute(
-                        "ALTER TABLE seller_requests "
-                        "ADD COLUMN seller_note TEXT NOT NULL DEFAULT ''"
-                    )
-                if "seller_expected_price" not in columns:
-                    conn.execute(
-                        "ALTER TABLE seller_requests "
-                        "ADD COLUMN seller_expected_price INTEGER NOT NULL DEFAULT 0"
-                    )
                 conn.execute(
                     """
                     UPDATE seller_requests
@@ -2552,8 +2563,8 @@ def install(original):
 
         msg = bot.send_message(
             message.chat.id,
-            "📝 Admin ကို ပြောချင်တဲ့ Note ရေးပို့ပါ။\n"
-            "မရှိရင် <code>မရှိ</code> လို့ ရိုက်ပို့ပါ။",
+            "📝 <b>ADMIN ကိုပြောချင်တာရှိရင် ဒီအောက်မှာ ရိုက်ပို့ပါ။</b>\n"
+            "ပြောစရာမရှိရင် <code>မရှိ</code> လို့ ရိုက်ပို့လို့ရပါတယ်။",
             parse_mode="HTML",
             reply_markup=original.back_button(),
         )
@@ -3139,6 +3150,47 @@ def install(original):
             }
             for update in updates or []:
                 message = getattr(update, "message", None)
+
+                # Robust text-flow interception: do not rely on next-step
+                # dispatch alone when main.py has competing message/state
+                # handlers. Seller Note states are handled here first.
+                if message is not None:
+                    state_now = original.get_state(
+                        message.from_user.id
+                    )
+                    flow_now = state_now.get("flow")
+
+                    if flow_now == "seller_note":
+                        try:
+                            _finish_seller_submission(message)
+                        except Exception:
+                            logging.exception("Seller note flow interception failed")
+                            try:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "❌ Seller Note ကို လက်ခံရာမှာ အမှားရှိနေပါတယ်။\n"
+                                    "ထပ်မံပို့ပေးပါခင်ဗျာ။",
+                                    reply_markup=original.back_button(),
+                                )
+                            except Exception:
+                                logging.exception("Seller note error reply failed")
+                        continue
+
+                    if flow_now == "seller_negotiate_note":
+                        try:
+                            _seller_negotiate_note(message)
+                        except Exception:
+                            logging.exception("Seller negotiate note interception failed")
+                            try:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "❌ ADMIN ကိုပို့မယ့် Note ကို လက်ခံရာမှာ အမှားရှိနေပါတယ်။\n"
+                                    "ထပ်မံပို့ပေးပါခင်ဗျာ။",
+                                    reply_markup=original.back_button(),
+                                )
+                            except Exception:
+                                logging.exception("Seller negotiate note error reply failed")
+                        continue
 
                 # Robust receipt handler: do not rely on next-step dispatch
                 # alone for photo/document uploads.
