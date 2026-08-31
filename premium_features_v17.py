@@ -3222,6 +3222,38 @@ def install(original):
                             )
                         continue
 
+                    if flow_now == "seller_expected_price":
+                        print(
+                            f"[SELLER_PRICE] direct-intercepted user_id={message.from_user.id} "
+                            f"text={(message.text or '')[:200]!r}",
+                            flush=True,
+                        )
+                        try:
+                            _start_seller_expected_price(message)
+                        except Exception:
+                            import traceback
+                            traceback.print_exc()
+                            logging.exception(
+                                "Seller expected price flow interception failed"
+                            )
+                        continue
+
+                    if flow_now == "seller_note":
+                        print(
+                            f"[SELLER_NOTE] direct-intercepted user_id={message.from_user.id} "
+                            f"text={(message.text or '')[:200]!r}",
+                            flush=True,
+                        )
+                        try:
+                            _finish_seller_submission(message)
+                        except Exception:
+                            import traceback
+                            traceback.print_exc()
+                            logging.exception(
+                                "Seller note flow interception failed"
+                            )
+                        continue
+
                     if flow_now == "seller_payout_destination":
                         try:
                             _seller_payout_destination_receive(message)
