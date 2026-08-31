@@ -36,12 +36,18 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 import threading
-import time
 import logging
 import html
+import time
 import gmail_oauth
 
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from telebot.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InputMediaPhoto,
+)
 
 _INSTALLED = False
 
@@ -155,18 +161,7 @@ def _install_reply_keyboard_layer(original):
                 parse_mode="HTML",
             )
 
-        # Keep navigation controls without adding explanatory text.
-        bot.send_message(
-            message.chat.id,
-            "\u200b",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("⬅️ အရင်Account", callback_data="premium_browse_prev"),
-                    InlineKeyboardButton("နောက် Account ➡️", callback_data="premium_browse_next"),
-                ],
-                [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")],
-            ]),
-        )
+        # Navigation keyboard is already handled by send_account_card().
         original.set_state(
             message.from_user.id,
             {"flow": "browse", "browse_index": 0},
@@ -212,13 +207,22 @@ def _install_reply_keyboard_layer(original):
                         pass
                     bot.send_message(
                         message.chat.id,
-                        "⁣",
-                        reply_markup=_reply_keyboard_markup(message.from_user.id, message.from_user.id == original.ADMIN_ID),
+                        "🏠 <b>Aung Gyi GameShop</b>\n"
+                        "အောက်က Menu ကနေ လိုတာကို ရွေးပြီး စတင်အသုံးပြုနိုင်ပါတယ်။",
+                        parse_mode="HTML",
+                        reply_markup=_reply_keyboard_markup(
+                            message.from_user.id,
+                            message.from_user.id == original.ADMIN_ID,
+                        ),
                     )
                     bot.send_message(
                         message.chat.id,
-                        "⁣",
-                        reply_markup=_inline_compact_main_menu(message.from_user.id, original),
+                        "📌 <b>ဝန်ဆောင်မှု Menu</b>",
+                        parse_mode="HTML",
+                        reply_markup=_inline_compact_main_menu(
+                            message.from_user.id,
+                            original,
+                        ),
                     )
                     continue
 
@@ -795,7 +799,7 @@ def install(original):
     # ------------------------------------------------------------
     _callback_dedupe = {}
     _callback_dedupe_lock = threading.Lock()
-    _CALLBACK_DEDUPE_SECONDS = 2.5
+    _CALLBACK_DEDUPE_SECONDS = 5.0
 
     def _silent_callback(call):
         try:
