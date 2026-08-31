@@ -796,6 +796,12 @@ def install(original):
     _callback_dedupe_lock = threading.Lock()
     _CALLBACK_DEDUPE_SECONDS = 2.5
 
+    def _silent_callback(call):
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+
     def _claim_callback(call):
         key = (
             int(call.from_user.id),
@@ -846,14 +852,14 @@ def install(original):
 
         if data == "premium_more":
             bot.answer_callback_query(call.id)
-            bot.send_message(
-                call.message.chat.id,
-                "🏠 <b>Aung Gyi GameShop</b>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
-                ]),
-            )
+            try:
+                bot.edit_message_reply_markup(
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=_inline_compact_main_menu(call.from_user.id, original),
+                )
+            except Exception:
+                logging.exception("premium_more menu markup update failed")
             return True
 
         if data == "premium_my_account":
@@ -1927,7 +1933,7 @@ def install(original):
                 return handle_browse(call, 0, forced_index=idx)
 
         if data in ("premium_browse_prev", "premium_browse_next"):
-            bot.answer_callback_query(call.id)
+            _silent_callback(call)
             return handle_browse(call, -1 if data.endswith("prev") else 1)
 
         # Admin-only feature tools.
