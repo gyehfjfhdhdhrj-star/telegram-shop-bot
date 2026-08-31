@@ -38,7 +38,7 @@ from difflib import SequenceMatcher
 import threading
 import logging
 import html
-from urllib.parse import quote
+import gmail_oauth
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
@@ -1055,16 +1055,11 @@ def install(original):
 
             mailbox_id, gmail_email = allocated
 
-            gmail_inbox_url = (
-                "https://mail.google.com/mail/"
-                f"?authuser={quote(gmail_email, safe="")}#inbox"
-            )
-
             assigned_markup = InlineKeyboardMarkup(row_width=1)
             assigned_markup.add(
                 InlineKeyboardButton(
                     "📧 Gmail Inbox ဖွင့်မယ်",
-                    url=gmail_inbox_url,
+                    callback_data=f"premium_seller_gmail_inbox_{request_id}",
                 )
             )
             assigned_markup.add(
@@ -1083,6 +1078,119 @@ def install(original):
                 parse_mode="HTML",
                 reply_markup=assigned_markup,
             )
+            return True
+
+        def _show_assigned_gmail_inbox(call, request_id):
+            row = _seller_request_row(request_id)
+            deal = _seller_deal_row(request_id)
+            if not row or not deal:
+                bot.send_message(
+                    call.message.chat.id,
+                    "❌ Gmail Request မတွေ့ပါ။",
+                    reply_markup=original.back_button(),
+                )
+                return
+
+            if int(row["user_id"]) != int(call.from_user.id):
+                bot.send_message(
+                    call.message.chat.id,
+                    "❌ ဒီ Gmail ကို သင့်အတွက် မသတ်မှတ်ထားပါ။",
+                    reply_markup=original.back_button(),
+                )
+                return
+
+            email = str(deal["gmail_email"] or "").strip()
+            if not email:
+                bot.send_message(
+                    call.message.chat.id,
+                    "❌ Assigned Gmail မတွေ့ပါ။",
+                    reply_markup=original.back_button(),
+                )
+                return
+
+            try:
+                recent = gmail_oauth.list_recent_messages(
+                    email,
+                    query="in:anywhere",
+                    max_results=10,
+                )
+            except Exception:
+                logging.exception(
+                    "Assigned Gmail inbox load failed request=%s",
+                    request_id,
+                )
+                bot.send_message(
+                    call.message.chat.id,
+                    "❌ Gmail Inbox ကို ဖွင့်မရသေးပါ။\n"
+                    "Admin ဘက်မှာ Gmail Authorization ကို ပြန်စစ်ပေးပါ။",
+                    reply_markup=original.back_button(),
+                )
+                return
+
+            lines = [
+                "📧 <b>Assigned Gmail Inbox</b>",
+                f"<code>{_esc(email)}</code>",
+                "",
+            ]
+
+            if not recent:
+                lines.append("📭 Mail မတွေ့သေးပါ။")
+            else:
+                for idx, item in enumerate(recent, 1):
+                    try:
+                        meta = gmail_oauth.get_message_headers(
+                            email,
+                            item["id"],
+                        )
+                        headers = meta.get("headers", {})
+                    except Exception:
+                        logging.exception(
+                            "Assigned Gmail message metadata failed request=%s id=%s",
+                            request_id,
+                            item.get("id"),
+                        )
+                        continue
+
+                    sender = _esc(headers.get("From", "-"))
+                    subject = _esc(headers.get("Subject", "-"))
+                    date_value = _esc(headers.get("Date", "-"))
+                    lines.append(
+                        f"<b>{idx}.</b> {sender}\n"
+                        f"   📝 {subject}\n"
+                        f"   🕒 {date_value}\n"
+                    )
+
+            m = InlineKeyboardMarkup(row_width=1)
+            m.add(
+                InlineKeyboardButton(
+                    "🔄 Inbox ပြန်စစ်မယ်",
+                    callback_data=f"premium_seller_gmail_inbox_{request_id}",
+                )
+            )
+            m.add(
+                InlineKeyboardButton(
+                    "✅ Gmail ရပြီးပြီ",
+                    callback_data=f"premium_seller_gmail_ready_{request_id}",
+                )
+            )
+
+            bot.send_message(
+                call.message.chat.id,
+                "\n".join(lines),
+                parse_mode="HTML",
+                reply_markup=m,
+            )
+
+        if data.startswith("premium_seller_gmail_inbox_"):
+            bot.answer_callback_query(call.id)
+            request_id = int(
+                data.replace(
+                    "premium_seller_gmail_inbox_",
+                    "",
+                    1,
+                )
+            )
+            _show_assigned_gmail_inbox(call, request_id)
             return True
 
         if data.startswith("premium_seller_moonton_no_"):
