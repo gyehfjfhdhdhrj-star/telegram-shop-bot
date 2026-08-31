@@ -36,6 +36,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 import threading
+import time
 import logging
 import html
 import gmail_oauth
@@ -826,11 +827,7 @@ def install(original):
     def handle_callback(call):
         if not _claim_callback(call):
             try:
-                bot.answer_callback_query(
-                    call.id,
-                    "ခဏစောင့်ပြီး ထပ်နှိပ်ပါ။",
-                    show_alert=False,
-                )
+                bot.answer_callback_query(call.id)
             except Exception:
                 pass
             return True
@@ -3720,9 +3717,12 @@ def install(original):
                         if handle_callback(call):
                             continue
                     except Exception:
-                        logging.exception("Premium callback failed: %s", getattr(call, "data", ""))
+                        logging.exception(
+                            "Premium callback failed: %s",
+                            getattr(call, "data", ""),
+                        )
                         try:
-                            bot.answer_callback_query(call.id, "လုပ်ဆောင်ရာမှာ အမှားရှိနေပါတယ်။", show_alert=True)
+                            bot.answer_callback_query(call.id)
                         except Exception:
                             pass
                         continue
