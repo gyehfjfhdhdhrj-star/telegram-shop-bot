@@ -42,6 +42,12 @@ from urllib.parse import quote
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
+print(
+    "[PREMIUM_FEATURES_DEBUG_BUILD] premium_features_v21_gmail_button.py "
+    "MODULE LOADED - if you see this after redeploy, the new file IS live",
+    flush=True,
+)
+
 _INSTALLED = False
 
 
@@ -265,9 +271,12 @@ def _install_reply_keyboard_layer(original):
 def install(original):
     """Install the addon onto the already-loaded main.py module."""
     global _INSTALLED
+    print("[PREMIUM_FEATURES_DEBUG_BUILD] install() called", flush=True)
     if _INSTALLED:
+        print("[PREMIUM_FEATURES_DEBUG_BUILD] install() skipped - already installed", flush=True)
         return
     _INSTALLED = True
+    print("[PREMIUM_FEATURES_DEBUG_BUILD] install() proceeding, _INSTALLED set True", flush=True)
 
     bot = original.bot
     ADMIN_ID = int(original.ADMIN_ID)
