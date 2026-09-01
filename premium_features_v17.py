@@ -1,5 +1,5 @@
 """
-MLBB MARKET - PREMIUM FEATURES ADDON v35
+MLBB MARKET - PREMIUM FEATURES ADDON v37
 =======================================
 This file is intentionally separate from:
     main.py
@@ -3378,6 +3378,15 @@ def install(original):
         if int(message.from_user.id) != ADMIN_ID:
             return
 
+        # This function can be called by the update interceptor before
+        # TeleBot dispatches a registered next-step handler.  Clear that
+        # pending handler now so it cannot accidentally consume the admin's
+        # following message after this receipt has already been processed.
+        try:
+            bot.clear_step_handler_by_chat_id(message.chat.id)
+        except Exception:
+            pass
+
         state = original.get_state(ADMIN_ID) or {}
         request_id = int(state.get("request_id", 0) or 0)
         if state.get("flow") != "seller_admin_payout_receipt" or request_id <= 0:
@@ -3708,10 +3717,19 @@ def install(original):
             "Admin ငွေလွှဲပြီးရင် ပြေစာကို Seller ဆီပို့ပေးပါ။"
         )
 
+        admin_markup = InlineKeyboardMarkup(row_width=1)
+        admin_markup.add(
+            InlineKeyboardButton(
+                "📸 ငွေလွှဲပြေစာပို့မယ်",
+                callback_data=f"premium_admin_send_payout_receipt_{request_id}",
+            )
+        )
+
         bot.send_message(
             ADMIN_ID,
             admin_text,
             parse_mode="HTML",
+            reply_markup=admin_markup,
         )
         bot.send_message(
             user_id,
@@ -3930,6 +3948,73 @@ def install(original):
                                 "Admin payout receipt flow failed"
                             )
                         continue
+
+                    # Admins often send the payout screenshot directly after
+                    # receiving the payout request.  That message previously
+                    # had no active next-step state, so Telegram treated the
+                    # image as an unrelated photo and the bot stayed silent.
+                    # Auto-attach only when there is exactly one pending payout;
+                    # when there are several, ask the admin to choose so a
+                    # receipt can never be forwarded to the wrong seller.
+                    is_admin_receipt_media = (
+                        int(message.from_user.id) == ADMIN_ID
+                        and (
+                            bool(getattr(message, "photo", None))
+                            or bool(getattr(message, "document", None))
+                        )
+                    )
+                    media_flows = {
+                        "buy_receipt",
+                        "seller_moonton_proof",
+                        "sell_photos",
+                        "admin_photos",
+                    }
+                    if is_admin_receipt_media and flow_now not in media_flows:
+                        try:
+                            pending = rows(
+                                "SELECT request_id FROM premium_seller_deals "
+                                "WHERE status='awaiting_admin_payout' "
+                                "ORDER BY updated_at DESC"
+                            )
+                            if len(pending) == 1:
+                                request_id = int(pending[0]["request_id"])
+                                original.set_state(
+                                    ADMIN_ID,
+                                    {
+                                        "flow": "seller_admin_payout_receipt",
+                                        "request_id": request_id,
+                                    },
+                                )
+                                _admin_payout_receipt_receive(message)
+                                continue
+
+                            if len(pending) > 1:
+                                chooser = InlineKeyboardMarkup(row_width=1)
+                                for item in pending[:20]:
+                                    request_id = int(item["request_id"])
+                                    chooser.add(
+                                        InlineKeyboardButton(
+                                            f"📸 SELL-{request_id:04d} ပြေစာပို့မယ်",
+                                            callback_data=(
+                                                "premium_admin_send_payout_receipt_"
+                                                f"{request_id}"
+                                            ),
+                                        )
+                                    )
+                                bot.send_message(
+                                    ADMIN_ID,
+                                    "⚠️ ငွေလွှဲရန်စောင့်နေတဲ့ Seller Request "
+                                    "တစ်ခုထက်ပိုရှိပါတယ်။\n\n"
+                                    "မှားတဲ့ Seller ဆီ မပို့မိအောင် အောက်က "
+                                    "SELL Request ကိုရွေးပြီး ပြေစာပုံကို "
+                                    "ပြန်ပို့ပေးပါ။",
+                                    reply_markup=chooser,
+                                )
+                                continue
+                        except Exception:
+                            logging.exception(
+                                "Direct admin payout receipt interception failed"
+                            )
 
                 if message is not None and (message.text or "") in quick_texts:
                     text_value = (message.text or "").strip()
