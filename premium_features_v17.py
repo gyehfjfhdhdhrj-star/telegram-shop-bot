@@ -240,7 +240,7 @@ def _install_reply_keyboard_layer(original):
 
                 if txt == "💸 လျော့စျေးအကောင့်များ":
                     try:
-                        ids = discounted_account_ids()
+                        ids = regular_discount_ids()
                         if not ids:
                             bot.send_message(
                                 message.chat.id,
@@ -668,7 +668,6 @@ def install(original):
             "special": ("premium_special_prev", "premium_special_next"),
         }
         prev_cb, next_cb = prev_next.get(kind, prev_next["browse"])
-
         kb = InlineKeyboardMarkup(row_width=2)
         kb.row(
             InlineKeyboardButton("⬅️ အရင် Account", callback_data=prev_cb),
@@ -697,44 +696,70 @@ def install(original):
         if not acc:
             bot.send_message(
                 chat_id,
-                "❌ ဒီအကောင့် မရှိတော့ပါ။",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]
-                ),
+                "❌ ဒီ Account ကို လက်ရှိ ရှာမတွေ့တော့ပါဘူး။",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                ]),
             )
             return
 
         photos = [p for p in (acc.get("photos") or []) if p][:3]
-        nav = account_nav_markup(kind, acc)
 
-        text_card = (
-            _format_special_card(acc)
-            if kind == "special"
-            else (
+        if kind == "special":
+            deal = active_flash(acc.get("db_id"))
+            if not deal:
+                bot.send_message(
+                    chat_id,
+                    "❌ ဒီအထူးစပရှယ် လျော့စျေးက အချိန်ကုန်သွားပါပြီ။",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                    ]),
+                )
+                return
+            deal_price, ends = deal
+            normal_price = int(acc.get("price") or acc.get("original_price") or 0)
+            discount_amount = max(0, normal_price - int(deal_price))
+            remain = max(0, int((ends - datetime.now(timezone.utc)).total_seconds()))
+            minutes = max(1, (remain + 59) // 60)
+            if minutes >= 60:
+                hours, mins = divmod(minutes, 60)
+                expiry = f"{hours} နာရီ" if mins == 0 else f"{hours} နာရီ {mins} မိနစ်"
+            else:
+                expiry = f"{minutes} မိနစ်"
+
+            text_card = (
+                f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
+                "🔥 <b>အထူးစပရှယ် လျော့စျေး</b>\n"
+                f"🆔 Account Code — <b>{html.escape(str(acc['id']))}</b>\n"
+                f"💰 အရင်ဈေး — <s>{normal_price:,} MMK</s>\n"
+                f"🔥 ယခုဈေး — <b>{int(deal_price):,} MMK</b>\n"
+                f"💸 လျော့ဈေး — <b>{discount_amount:,} MMK</b>\n"
+                f"⏰ ကုန်ဆုံးချိန် — <b>{html.escape(expiry)}</b>\n\n"
+                + format_account_wrapped(acc)
+            )
+        else:
+            text_card = (
                 f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
                 + format_account_wrapped(acc)
             )
-        )
+
+        keyboard = account_nav_markup(kind, acc)
 
         if photos:
             media = []
             for i, photo in enumerate(photos):
                 try:
-                    if i == 0:
-                        media.append(
-                            InputMediaPhoto(
-                                photo,
-                                caption=text_card,
-                                parse_mode="HTML",
-                            )
+                    media.append(
+                        InputMediaPhoto(
+                            photo,
+                            caption=text_card if i == 0 else None,
+                            parse_mode="HTML" if i == 0 else None,
                         )
-                    else:
-                        media.append(InputMediaPhoto(photo))
+                    )
                 except Exception:
                     logging.exception(
                         "ACCOUNT_CARD_MEDIA_BUILD_FAILED account=%s photo=%s",
-                        acc.get("id"),
-                        i + 1,
+                        acc.get("id"), i + 1,
                     )
 
             if media:
@@ -743,43 +768,34 @@ def install(original):
                 except Exception:
                     logging.exception(
                         "ACCOUNT_CARD_MEDIA_GROUP_FAILED account=%s kind=%s",
-                        acc.get("id"),
-                        kind,
+                        acc.get("id"), kind,
                     )
-                    # Reliable fallback: send the same photos individually.
-                    for i, photo in enumerate(photos, 1):
+                    # Fallback only if the album API fails.
+                    for i, photo in enumerate(photos):
                         try:
                             bot.send_photo(
                                 chat_id,
                                 photo,
-                                caption=text_card if i == 1 else None,
-                                parse_mode="HTML" if i == 1 else None,
+                                caption=text_card if i == 0 else None,
+                                parse_mode="HTML" if i == 0 else None,
                             )
                         except Exception:
                             logging.exception(
                                 "ACCOUNT_CARD_PHOTO_FALLBACK_FAILED account=%s photo=%s",
-                                acc.get("id"),
-                                i,
+                                acc.get("id"), i + 1,
                             )
             else:
-                bot.send_message(
-                    chat_id,
-                    text_card,
-                    parse_mode="HTML",
-                )
+                bot.send_message(chat_id, text_card, parse_mode="HTML")
         else:
-            bot.send_message(
-                chat_id,
-                text_card,
-                parse_mode="HTML",
-            )
+            bot.send_message(chat_id, text_card, parse_mode="HTML")
 
-        # The menu is always sent once, after the account content.
+        # Do not send a separate Account Code bubble. The code is already
+        # inside the account card/detail text.
         bot.send_message(
             chat_id,
-            f"🆔 <b>{html.escape(str(acc['id']))}</b>",
+            "📌 <b>လုပ်ဆောင်ရန် ရွေးချယ်ပါ</b>",
             parse_mode="HTML",
-            reply_markup=nav,
+            reply_markup=keyboard,
         )
 
     # ------------------------------------------------------------
@@ -988,9 +1004,6 @@ def install(original):
         if data.startswith("premium_account_detail_"):
             bot.answer_callback_query(call.id)
             account_id = data.replace("premium_account_detail_", "", 1)
-
-            # Resolve from the exact available-account collection used by
-            # Browse. This preserves the stored `photos` list reliably.
             acc = None
             try:
                 for candidate in original.get_available_accounts():
@@ -998,150 +1011,78 @@ def install(original):
                         acc = candidate
                         break
             except Exception:
-                logging.exception(
-                    "Available-account detail lookup failed: %s",
-                    account_id,
-                )
+                logging.exception("Account detail lookup failed account=%s", account_id)
 
             if not acc:
                 bot.send_message(
                     call.message.chat.id,
-                    "❌ Account မတွေ့ပါ။",
+                    "❌ ဒီ Account ကို လက်ရှိ ရှာမတွေ့တော့ပါဘူး။",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
                     ]),
                 )
                 return True
 
-            effective_price = int(
-                acc.get("effective_price") or acc.get("price") or 0
-            )
-            original_price = int(acc.get("original_price") or 0)
+            effective_price = int(acc.get("effective_price") or acc.get("price") or 0)
+            original_price = int(acc.get("original_price") or acc.get("price") or 0)
+            code = html.escape(str(acc.get("id") or account_id))
+            title = html.escape(str(acc.get("title") or "ML Account"))
+            skins = html.escape(str(acc.get("skins") or "မဖော်ပြထားပါ"))
+            status = html.escape(str(acc.get("status") or "available"))
 
-            # "Special" removed from detail view.
             detail_text = (
-                "🔎 <b>အကောင့်အသေးစိတ်</b>\n\n"
+                "📋 <b>အကောင့်အသေးစိတ်</b>\n\n"
                 "🏪 <b>Aung Gyi GameShop</b>\n"
-                f"🆔 Account Code — <b>{html.escape(str(acc['id']))}</b>\n"
-                f"👤 Account Name — <b>{html.escape(str(acc.get('title') or 'ML Account'))}</b>\n"
-                f"✨ Skin — <b>{html.escape(str(acc.get('skins') or 'မဖော်ပြထားပါ'))}</b>\n"
+                f"🆔 Account Code — <b>{code}</b>\n"
+                f"👤 Account Name — <b>{title}</b>\n"
+                f"✨ Skin — <b>{skins}</b>\n"
                 f"💰 လက်ရှိဈေး — <b>{effective_price:,} MMK</b>\n"
                 f"🆕 New — <b>{'✅' if acc.get('is_new') else '❌'}</b>\n"
-                f"✅ Status — <b>{html.escape(str(acc.get('status') or 'available'))}</b>\n"
+                f"✅ Status — <b>{status}</b>"
             )
-
             if original_price and original_price != effective_price:
-                detail_text += (
-                    f"💸 မူရင်းဈေး — <s>{original_price:,} MMK</s>\n"
-                )
-
-            detail_text += (
-                "\n📋 <b>အကောင့်အချက်အလက်အပြည့်အစုံ</b>\n"
-                "✅ Admin စစ်ဆေးထားပြီး\n"
-            )
+                detail_text += f"\n💸 မူရင်းဈေး — <s>{original_price:,} MMK</s>"
 
             photos = [p for p in (acc.get("photos") or []) if p]
 
-            # Full detail text first.
+            # IMPORTANT: photos first, then text, matching the Browse flow.
+            if photos:
+                media = []
+                for photo in photos:
+                    try:
+                        media.append(InputMediaPhoto(photo))
+                    except Exception:
+                        logging.exception("DETAIL_MEDIA_BUILD_FAILED account=%s", code)
+
+                if media:
+                    try:
+                        # Telegram supports max 10 items per media group.
+                        for offset in range(0, len(media), 10):
+                            bot.send_media_group(
+                                call.message.chat.id,
+                                media[offset:offset + 10],
+                            )
+                    except Exception:
+                        logging.exception("DETAIL_MEDIA_GROUP_FAILED account=%s", code)
+                        # Fallback to individual photos.
+                        for photo in photos:
+                            try:
+                                bot.send_photo(call.message.chat.id, photo)
+                            except Exception:
+                                logging.exception("DETAIL_PHOTO_FALLBACK_FAILED account=%s", code)
+
             bot.send_message(
                 call.message.chat.id,
                 detail_text,
                 parse_mode="HTML",
             )
-
-            # All account images in Telegram media groups.
-            if photos:
-                logging.info(
-                    "ACCOUNT_DETAIL_PHOTOS account=%s count=%s",
-                    acc.get("id"),
-                    len(photos),
-                )
-
-                for chunk_start in range(0, len(photos), 10):
-                    chunk_photos = photos[chunk_start:chunk_start + 10]
-                    media = []
-
-                    for idx, photo in enumerate(chunk_photos, chunk_start + 1):
-                        try:
-                            if idx == 1:
-                                media.append(
-                                    InputMediaPhoto(
-                                        photo,
-                                        caption=(
-                                            f"📸 {html.escape(str(acc['id']))}\n"
-                                            f"ပုံ {idx}/{len(photos)}"
-                                        ),
-                                        parse_mode="HTML",
-                                    )
-                                )
-                            else:
-                                media.append(InputMediaPhoto(photo))
-                        except Exception:
-                            logging.exception(
-                                "ACCOUNT_DETAIL_MEDIA_BUILD_FAILED account=%s photo=%s",
-                                acc.get("id"),
-                                idx,
-                            )
-
-                    if not media:
-                        continue
-
-                    try:
-                        bot.send_media_group(
-                            call.message.chat.id,
-                            media,
-                        )
-                        logging.info(
-                            "ACCOUNT_DETAIL_MEDIA_GROUP_OK account=%s start=%s count=%s",
-                            acc.get("id"),
-                            chunk_start + 1,
-                            len(media),
-                        )
-                    except Exception:
-                        logging.exception(
-                            "ACCOUNT_DETAIL_MEDIA_GROUP_FAILED account=%s start=%s count=%s",
-                            acc.get("id"),
-                            chunk_start + 1,
-                            len(media),
-                        )
-
-                        # Reliable fallback: send the same photos individually.
-                        for idx, photo in enumerate(chunk_photos, chunk_start + 1):
-                            try:
-                                bot.send_photo(
-                                    call.message.chat.id,
-                                    photo,
-                                    caption=(
-                                        f"📸 {html.escape(str(acc['id']))} — "
-                                        f"ပုံ {idx}/{len(photos)}"
-                                    ),
-                                    parse_mode="HTML",
-                                )
-                            except Exception:
-                                logging.exception(
-                                    "ACCOUNT_DETAIL_PHOTO_FALLBACK_FAILED account=%s photo=%s",
-                                    acc.get("id"),
-                                    idx,
-                                )
-            else:
-                logging.warning(
-                    "ACCOUNT_DETAIL_NO_PHOTOS account=%s",
-                    acc.get("id"),
-                )
-
-            # Only one full-width Home button.
-            home_markup = InlineKeyboardMarkup(row_width=1)
-            home_markup.add(
-                InlineKeyboardButton(
-                    "🏠 ပင်မ Menu",
-                    callback_data="home",
-                )
-            )
             bot.send_message(
                 call.message.chat.id,
                 "🏠 <b>ပင်မ Menu</b>",
                 parse_mode="HTML",
-                reply_markup=home_markup,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                ]),
             )
             return True
 
@@ -2407,12 +2348,14 @@ def install(original):
         if not receipt_file_id:
             msg = bot.send_message(
                 message.chat.id,
-                "❌ ပြေစာပုံ ပို့ပေးပါခင်ဗျာ။\n\n"
-                "ဓာတ်ပုံ (သို့) image file အဖြစ် ပို့လို့ရပါတယ်။",
+                "❌ ငွေလွှဲပြေစာ ပုံကို ပို့ပေးပါခင်ဗျာ။\n\n"
+                "ဓာတ်ပုံအဖြစ်ပို့နိုင်သလို Image File အဖြစ်လည်း ပို့နိုင်ပါတယ်။",
                 reply_markup=original.back_button(),
             )
             bot.register_next_step_handler(msg, _buy_receipt_receive)
             return
+
+        logging.info("BUY_RECEIPT_ACCEPTED user=%s account=%s type=%s", message.from_user.id, code, receipt_type)
 
         request_id = _save_buy_request(
             message.from_user.id,
@@ -3326,6 +3269,7 @@ def install(original):
 
         state = original.get_state(ADMIN_ID)
         if state.get("flow") != "seller_admin_payout_receipt":
+            logging.warning("ADMIN_PAYOUT_RECEIPT_NO_ACTIVE_STATE admin=%s", ADMIN_ID)
             return
 
         request_id = int(state.get("request_id", 0) or 0)
@@ -3365,6 +3309,7 @@ def install(original):
             status="awaiting_seller_payout_confirmation",
         )
         original.clear_state(ADMIN_ID)
+        logging.info("ADMIN_PAYOUT_RECEIPT_ACCEPTED request=%s seller=%s type=%s", request_id, row["user_id"], file_type)
 
         seller_id = int(row["user_id"])
 
