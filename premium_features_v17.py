@@ -62,12 +62,17 @@ def _reply_keyboard_markup(user_id, admin=False):
 
 
 def _inline_compact_main_menu(user_id, original):
-    """Flat Inline Menu: feature buttons only, no Reply Keyboard duplicates."""
+    """Main user menu: two full-width columns per row, with regular + special discounts."""
     m = InlineKeyboardMarkup(row_width=2)
-    m.add(
+    m.row(
         InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
         InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
+    )
+    m.row(
         InlineKeyboardButton("🔎 ဂိမ်းအကောင့်ရှာမယ်", callback_data="premium_advanced_search"),
+        InlineKeyboardButton("💸 လျော့စျေးအကောင့်များ", callback_data="premium_discount_accounts"),
+    )
+    m.row(
         InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
     )
     return m
@@ -637,16 +642,17 @@ def install(original):
     # Menus
     # ------------------------------------------------------------
     def buyer_features_menu():
-        m = InlineKeyboardMarkup(row_width=2)
-        m.row(
-            InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
-            InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
-        )
-        m.row(
-            InlineKeyboardButton("🔎 ဂိမ်းအကောင့်ရှာမယ်", callback_data="premium_advanced_search"),
-            InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
-        )
-        m.row(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+        """After any user action, show ONLY the single main-menu button."""
+        m = InlineKeyboardMarkup(row_width=1)
+        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
+        return m
+
+    def admin_contact_menu():
+        m = InlineKeyboardMarkup(row_width=1)
+        if getattr(original, "ADMIN_USERNAME", ""):
+            m.add(InlineKeyboardButton("👨‍💻 Admin ကို ဆက်သွယ်မယ်", url=f"https://t.me/{original.ADMIN_USERNAME}"))
+        m.add(InlineKeyboardButton("📞 Admin ဖုန်း — 09987479721", callback_data="premium_admin_contact"))
+        m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
         return m
 
     def admin_features_menu():
@@ -838,12 +844,24 @@ def install(original):
                 )
         return ids
 
+    def _ensure_account_price_columns():
+        """Ensure regular discount columns exist without deleting existing account data."""
+        with db_lock:
+            with closing(db_connect()) as conn:
+                cols = {r["name"] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+                if "sale_price" not in cols:
+                    conn.execute("ALTER TABLE accounts ADD COLUMN sale_price INTEGER")
+                if "original_price" not in cols:
+                    conn.execute("ALTER TABLE accounts ADD COLUMN original_price INTEGER")
+                conn.commit()
+
     def regular_discount_ids():
         """Return only available accounts whose normal price is above sale_price.
         Prefer the account service data, with a SQL fallback for older schemas.
         """
         out = []
         try:
+            _ensure_account_price_columns()
             accounts = original.get_available_accounts() or []
             for acc in accounts:
                 try:
@@ -866,6 +884,7 @@ def install(original):
         # dictionaries. Try the database directly, but never let this menu
         # fail silently.
         try:
+            _ensure_account_price_columns()
             result = rows(
                 "SELECT id FROM accounts WHERE status='available' "
                 "AND sale_price IS NOT NULL AND sale_price > 0 AND sale_price < price "
@@ -1052,11 +1071,10 @@ def install(original):
             detail_text = (
                 "📋 <b>အကောင့်အသေးစိတ်</b>\n\n"
                 "🏪 <b>Aung Gyi GameShop</b>\n"
-                f"🆔 Account Code — <b>{code}</b>\n"
                 f"👤 Account Name — <b>{title}</b>\n"
                 f"✨ Skin — <b>{skins}</b>\n"
                 f"💰 လက်ရှိဈေး — <b>{effective_price:,} MMK</b>\n"
-                f"🆕 New — <b>{'✅' if acc.get('is_new') else '❌'}</b>\n"
+                f"New - <b>{'✅' if acc.get('is_new') else '❌'}</b>\n"
                 f"✅ Status — <b>{status}</b>"
             )
             if original_price and original_price != effective_price:
@@ -1187,6 +1205,18 @@ def install(original):
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]]),
                 )
+            return True
+
+        if data == "premium_admin_contact":
+            bot.answer_callback_query(call.id)
+            bot.send_message(
+                call.message.chat.id,
+                "📞 <b>Admin ကို ဆက်သွယ်ရန်</b>\n\n"
+                "Admin လိုင်းပေါ်မရှိပါက ဖုန်းဆက်ပါခင်ဗျာ\n"
+                "<b>09987479721</b>",
+                parse_mode="HTML",
+                reply_markup=buyer_features_menu(),
+            )
             return True
 
         if data == "premium_buy_cancel":
@@ -1928,15 +1958,14 @@ def install(original):
                 return True
             deal = active_flash(acc["db_id"])
             price = deal[0] if deal else int(acc.get("effective_price") or acc["price"])
-            m = InlineKeyboardMarkup(row_width=1)
-            if original.ADMIN_USERNAME:
-                m.add(InlineKeyboardButton("👨‍💻 Admin ကို တိုက်ရိုက်ဆက်သွယ်မယ်", url=f"https://t.me/{original.ADMIN_USERNAME}"))
-            m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
             bot.send_message(
                 call.message.chat.id,
-                f"⚡ <b>အမြန်ဝယ်မယ်</b>\n\n{format_account_wrapped(acc)}\n\n💰 <b>ဝယ်ဈေး — {price:,} MMK</b>",
+                "⚡ <b>အမြန်ဝယ်မယ်</b>\n\n"
+                "✅ <b>Admin အကောင့်အား ဂိမ်း Account ရယူဖို့ အခုဘဲ ဆက်သွယ်ပါခင်ဗျာ။</b>\n\n"
+                "Admin လိုင်းပေါ်မရှိပါက ဖုန်းဆက်ပါခင်ဗျာ\n"
+                "<b>09987479721</b>",
                 parse_mode="HTML",
-                reply_markup=m,
+                reply_markup=admin_contact_menu(),
             )
             return True
 
@@ -3349,12 +3378,27 @@ def install(original):
         if int(message.from_user.id) != ADMIN_ID:
             return
 
-        state = original.get_state(ADMIN_ID)
-        if state.get("flow") != "seller_admin_payout_receipt":
-            logging.warning("ADMIN_PAYOUT_RECEIPT_NO_ACTIVE_STATE admin=%s", ADMIN_ID)
-            return
-
+        state = original.get_state(ADMIN_ID) or {}
         request_id = int(state.get("request_id", 0) or 0)
+        if state.get("flow") != "seller_admin_payout_receipt" or request_id <= 0:
+            # Recovery path: admin may have sent the receipt after a delayed/duplicate tap
+            # cleared the temporary state. Pick the newest payout awaiting admin receipt.
+            try:
+                pending = rows(
+                    "SELECT request_id FROM premium_seller_deals "
+                    "WHERE status='awaiting_admin_payout' "
+                    "ORDER BY updated_at DESC LIMIT 1"
+                )
+                if pending:
+                    request_id = int(pending[0]["request_id"])
+                else:
+                    logging.warning("ADMIN_PAYOUT_RECEIPT_NO_ACTIVE_STATE admin=%s", ADMIN_ID)
+                    bot.send_message(ADMIN_ID, "❌ လက်ရှိ ငွေလွှဲရန် Seller Request မတွေ့ပါ။")
+                    return
+            except Exception:
+                logging.exception("ADMIN_PAYOUT_RECEIPT_STATE_RECOVERY_FAILED")
+                bot.send_message(ADMIN_ID, "❌ ငွေလွှဲပြေစာ Request ကို ရှာမတွေ့ပါ။")
+                return
 
         file_id = ""
         file_type = ""
@@ -3745,6 +3789,7 @@ def install(original):
                 "🛒 အကောင့်ဝယ်မယ်",
                 "👀 အကောင့်ကြည့်မယ်",
                 "💰 အကောင့်ရောင်းမယ်",
+                "💸 လျော့စျေးအကောင့်များ",
             }
             for update in updates or []:
                 message = getattr(update, "message", None)
@@ -3920,6 +3965,32 @@ def install(original):
                         except Exception:
                             logging.exception("Quick browse keyboard failed")
                         continue
+                    if text_value == "💸 လျော့စျေးအကောင့်များ":
+                        try:
+                            ids = regular_discount_ids()
+                            if not ids:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "💸 လောလောဆယ် ပုံမှန်ဈေးထက် လျော့ဈေးထားတဲ့ Account မရှိသေးပါ။",
+                                    reply_markup=buyer_features_menu(),
+                                )
+                            else:
+                                original.set_state(message.from_user.id, {
+                                    "flow": "premium_discount",
+                                    "premium_ids": ids,
+                                    "premium_index": 0,
+                                    "premium_kind": "discount",
+                                })
+                                acc = account_by_text(ids[0])
+                                send_account_card(message.chat.id, acc, "discount", 0, len(ids))
+                        except Exception:
+                            logging.exception("Quick discount keyboard failed")
+                            bot.send_message(
+                                message.chat.id,
+                                "❌ လျော့စျေး Account များကို ဖွင့်ရာမှာ အမှားဖြစ်နေပါတယ်။",
+                                reply_markup=buyer_features_menu(),
+                            )
+                        continue
                     if text_value == "💰 အကောင့်ရောင်းမယ်":
                         try:
                             original.clear_state(message.from_user.id)
@@ -4046,8 +4117,12 @@ def install(original):
 
     try:
         init_feature_db()
+        _ensure_account_price_columns()
         _ensure_seller_deals_table()
         logging.info("SELLER_DEALS_SCHEMA_OK")
+        logging.info("ALL_MENU_HOME_ONLY_OK")
+        logging.info("REGULAR_DISCOUNT_FLOW_READY")
+        logging.info("PAYOUT_RECEIPT_RECOVERY_READY")
     except Exception:
         logging.exception("Premium feature schema initialization failed before monitor start")
 
