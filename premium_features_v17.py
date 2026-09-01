@@ -1,5 +1,5 @@
 """
-MLBB MARKET - PREMIUM FEATURES ADDON v17
+MLBB MARKET - PREMIUM FEATURES ADDON v35
 =======================================
 This file is intentionally separate from:
     main.py
@@ -638,13 +638,15 @@ def install(original):
     # ------------------------------------------------------------
     def buyer_features_menu():
         m = InlineKeyboardMarkup(row_width=2)
-        m.add(
+        m.row(
             InlineKeyboardButton("❤️ သိမ်းထားတဲ့အကောင့်များ", callback_data="premium_favorites"),
             InlineKeyboardButton("🆕 အသစ်တင်ထားတဲ့အကောင့်များ", callback_data="premium_new_accounts"),
+        )
+        m.row(
             InlineKeyboardButton("🔎 ဂိမ်းအကောင့်ရှာမယ်", callback_data="premium_advanced_search"),
             InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals"),
-            InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"),
         )
+        m.row(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
         return m
 
     def admin_features_menu():
@@ -745,21 +747,19 @@ def install(original):
 
         keyboard = account_nav_markup(kind, acc)
 
+        # Album first. Telegram media groups cannot carry a single inline
+        # keyboard reliably, so the account information is sent as the next
+        # message with the keyboard attached. This removes the old extra
+        # "လုပ်ဆောင်ရန် ရွေးချယ်ပါ" message completely.
         if photos:
             media = []
-            for i, photo in enumerate(photos):
+            for photo in photos:
                 try:
-                    media.append(
-                        InputMediaPhoto(
-                            photo,
-                            caption=text_card if i == 0 else None,
-                            parse_mode="HTML" if i == 0 else None,
-                        )
-                    )
+                    media.append(InputMediaPhoto(photo))
                 except Exception:
                     logging.exception(
                         "ACCOUNT_CARD_MEDIA_BUILD_FAILED account=%s photo=%s",
-                        acc.get("id"), i + 1,
+                        acc.get("id"), len(media) + 1,
                     )
 
             if media:
@@ -770,30 +770,20 @@ def install(original):
                         "ACCOUNT_CARD_MEDIA_GROUP_FAILED account=%s kind=%s",
                         acc.get("id"), kind,
                     )
-                    # Fallback only if the album API fails.
-                    for i, photo in enumerate(photos):
+                    # Reliable fallback: send photos individually.
+                    for photo in photos:
                         try:
-                            bot.send_photo(
-                                chat_id,
-                                photo,
-                                caption=text_card if i == 0 else None,
-                                parse_mode="HTML" if i == 0 else None,
-                            )
+                            bot.send_photo(chat_id, photo)
                         except Exception:
                             logging.exception(
-                                "ACCOUNT_CARD_PHOTO_FALLBACK_FAILED account=%s photo=%s",
-                                acc.get("id"), i + 1,
+                                "ACCOUNT_CARD_PHOTO_FALLBACK_FAILED account=%s",
+                                acc.get("id"),
                             )
-            else:
-                bot.send_message(chat_id, text_card, parse_mode="HTML")
-        else:
-            bot.send_message(chat_id, text_card, parse_mode="HTML")
 
-        # Do not send a separate Account Code bubble. The code is already
-        # inside the account card/detail text.
+        # Info comes after the album and owns the only menu below it.
         bot.send_message(
             chat_id,
-            "📌 <b>လုပ်ဆောင်ရန် ရွေးချယ်ပါ</b>",
+            text_card,
             parse_mode="HTML",
             reply_markup=keyboard,
         )
@@ -849,16 +839,45 @@ def install(original):
         return ids
 
     def regular_discount_ids():
+        """Return only available accounts whose normal price is above sale_price.
+        Prefer the account service data, with a SQL fallback for older schemas.
+        """
         out = []
-        for acc in original.get_available_accounts():
-            try:
-                normal_price = int(acc.get("price") or 0)
-                sale_price = int(acc.get("sale_price") or 0)
-                if normal_price > 0 and sale_price > 0 and sale_price < normal_price:
-                    out.append(acc["id"])
-            except Exception:
-                logging.exception("REGULAR_DISCOUNT_LOOKUP_FAILED account=%s", acc.get("id"))
-        return out
+        try:
+            accounts = original.get_available_accounts() or []
+            for acc in accounts:
+                try:
+                    normal_price = int(acc.get("price") or acc.get("original_price") or 0)
+                    sale_price = int(acc.get("sale_price") or 0)
+                    if normal_price > 0 and sale_price > 0 and sale_price < normal_price:
+                        out.append(str(acc["id"]))
+                except Exception:
+                    logging.exception(
+                        "REGULAR_DISCOUNT_LOOKUP_FAILED account=%s",
+                        acc.get("id") if isinstance(acc, dict) else "?",
+                    )
+        except Exception:
+            logging.exception("REGULAR_DISCOUNT_ACCOUNT_SERVICE_FAILED")
+
+        if out:
+            return out
+
+        # Older main.py/account loaders may not expose sale_price in their
+        # dictionaries. Try the database directly, but never let this menu
+        # fail silently.
+        try:
+            result = rows(
+                "SELECT id FROM accounts WHERE status='available' "
+                "AND sale_price IS NOT NULL AND sale_price > 0 AND sale_price < price "
+                "ORDER BY id DESC"
+            )
+            for r in result:
+                acc = account_by_number(int(r["id"]))
+                if acc and acc.get("status") == "available":
+                    out.append(str(acc["id"]))
+        except Exception:
+            logging.exception("REGULAR_DISCOUNT_SQL_FALLBACK_FAILED")
+        return list(dict.fromkeys(out))
 
     def special_discount_ids():
         out = []
@@ -1074,11 +1093,6 @@ def install(original):
             bot.send_message(
                 call.message.chat.id,
                 detail_text,
-                parse_mode="HTML",
-            )
-            bot.send_message(
-                call.message.chat.id,
-                "🏠 <b>ပင်မ Menu</b>",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
@@ -2233,7 +2247,45 @@ def install(original):
         deal = active_flash(acc.get("db_id")) if acc else None
         return int(deal[0]) if deal else int(acc.get("effective_price") or acc.get("price") or 0)
 
+    def _ensure_buy_requests_table():
+        """Create/migrate the buyer receipt table before every receipt insert.
+        This protects deployments restored from older SQLite snapshots.
+        """
+        with db_lock:
+            with closing(db_connect()) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS premium_buy_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        buyer_user_id INTEGER NOT NULL,
+                        account_id INTEGER NOT NULL,
+                        account_code TEXT NOT NULL,
+                        price INTEGER NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'awaiting_receipt',
+                        receipt_file_id TEXT NOT NULL DEFAULT '',
+                        receipt_type TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(premium_buy_requests)").fetchall()}
+                migrations = {
+                    "buyer_user_id": "INTEGER NOT NULL DEFAULT 0",
+                    "account_id": "INTEGER NOT NULL DEFAULT 0",
+                    "account_code": "TEXT NOT NULL DEFAULT ''",
+                    "price": "INTEGER NOT NULL DEFAULT 0",
+                    "status": "TEXT NOT NULL DEFAULT 'awaiting_receipt'",
+                    "receipt_file_id": "TEXT NOT NULL DEFAULT ''",
+                    "receipt_type": "TEXT NOT NULL DEFAULT ''",
+                    "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+                    "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+                }
+                for col, definition in migrations.items():
+                    if col not in cols:
+                        conn.execute(f"ALTER TABLE premium_buy_requests ADD COLUMN {col} {definition}")
+                conn.commit()
+
     def _save_buy_request(buyer_user_id, acc, price, receipt_file_id, receipt_type):
+        _ensure_buy_requests_table()
         with db_lock:
             with closing(db_connect()) as conn:
                 cur = conn.execute(
@@ -2357,13 +2409,43 @@ def install(original):
 
         logging.info("BUY_RECEIPT_ACCEPTED user=%s account=%s type=%s", message.from_user.id, code, receipt_type)
 
-        request_id = _save_buy_request(
-            message.from_user.id,
-            acc,
-            price,
-            receipt_file_id,
-            receipt_type,
-        )
+        try:
+            request_id = _save_buy_request(
+                message.from_user.id,
+                acc,
+                price,
+                receipt_file_id,
+                receipt_type,
+            )
+        except Exception:
+            logging.exception(
+                "BUY_RECEIPT_SAVE_FAILED user=%s account=%s; retrying after table migration",
+                message.from_user.id,
+                code,
+            )
+            try:
+                _ensure_buy_requests_table()
+                request_id = _save_buy_request(
+                    message.from_user.id,
+                    acc,
+                    price,
+                    receipt_file_id,
+                    receipt_type,
+                )
+            except Exception:
+                logging.exception(
+                    "BUY_RECEIPT_SAVE_RETRY_FAILED user=%s account=%s",
+                    message.from_user.id,
+                    code,
+                )
+                bot.send_message(
+                    message.chat.id,
+                    "❌ ပြေစာကို သိမ်းဆည်းရာမှာ အမှားဖြစ်နေပါတယ်။ ခဏနေပြီး ပြန်ပို့ပေးပါခင်ဗျာ။",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                    ]),
+                )
+                return
 
         original.clear_state(message.from_user.id)
 
@@ -3299,6 +3381,10 @@ def install(original):
         deal = _seller_deal_row(request_id)
         if not row or not deal:
             original.clear_state(ADMIN_ID)
+            bot.send_message(
+                ADMIN_ID,
+                f"❌ SELL-{request_id:04d} Seller Request မတွေ့ပါ။",
+            )
             return
 
         _upsert_seller_deal(
@@ -3712,12 +3798,19 @@ def install(original):
                             logging.exception(
                                 "Buy receipt flow interception failed"
                             )
-                            bot.send_message(
-                                message.chat.id,
-                                "❌ ပြေစာကို လက်ခံရာမှာ အမှားရှိနေပါတယ်။ "
-                                "ထပ်ပို့ပေးပါခင်ဗျာ။",
-                                reply_markup=original.back_button(),
-                            )
+                            # Only show an error if the handler itself truly failed.
+                            # Do not overwrite a successful receipt with the old
+                            # generic "receipt error" response.
+                            try:
+                                bot.send_message(
+                                    message.chat.id,
+                                    "❌ ပြေစာကို လက်ခံရာမှာ အမှားဖြစ်နေပါတယ်။ ခဏနေပြီး ပြေစာပုံကို ပြန်ပို့ပေးပါခင်ဗျာ။",
+                                    reply_markup=InlineKeyboardMarkup([
+                                        [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                                    ]),
+                                )
+                            except Exception:
+                                pass
                         continue
 
                     if flow_now == "seller_moonton_proof":
