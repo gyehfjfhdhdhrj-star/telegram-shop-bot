@@ -239,23 +239,36 @@ def _install_reply_keyboard_layer(original):
                     continue
 
                 if txt == "💸 လျော့စျေးအကောင့်များ":
-                    # Hand the same original discount menu callback a proper update.
                     try:
-                        from types import SimpleNamespace
-                        # Use a lightweight direct flow: invoke the original callback is unsafe,
-                        # so let the original handler process a synthetic callback is avoided.
-                        # Instead present the existing discount action through a small inline menu.
-                        bot.send_message(
-                            message.chat.id,
-                            "💸 <b>လျော့စျေးအကောင့်များ</b>",
-                            parse_mode="HTML",
-                            reply_markup=InlineKeyboardMarkup([
-                                [InlineKeyboardButton("🔥 အထူးစပရှယ် လျော့စျေးအကောင့်များ", callback_data="premium_special_deals")],
-                                [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")],
-                            ]),
-                        )
+                        ids = discounted_account_ids()
+                        if not ids:
+                            bot.send_message(
+                                message.chat.id,
+                                "💸 လောလောဆယ် ရိုးရိုးစျေးလျော့ထားတဲ့ Account မရှိသေးပါ။",
+                                reply_markup=InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                                ]),
+                            )
+                        else:
+                            original.set_state(
+                                message.from_user.id,
+                                {
+                                    "flow": "premium_discount",
+                                    "premium_ids": ids,
+                                    "premium_index": 0,
+                                    "premium_kind": "discount",
+                                },
+                            )
+                            acc = account_by_text(ids[0])
+                            send_account_card(
+                                message.chat.id,
+                                acc,
+                                "discount",
+                                0,
+                                len(ids),
+                            )
                     except Exception:
-                        logging.exception("Discount reply keyboard failed")
+                        logging.exception("Regular discount menu failed")
                     continue
 
             remaining.append(update)
@@ -651,23 +664,17 @@ def install(original):
             "favorites": ("premium_fav_prev", "premium_fav_next"),
             "new": ("premium_new_prev", "premium_new_next"),
             "verified": ("premium_ver_prev", "premium_ver_next"),
+            "discount": ("premium_discount_prev", "premium_discount_next"),
+            "special": ("premium_special_prev", "premium_special_next"),
         }
         prev_cb, next_cb = prev_next.get(kind, prev_next["browse"])
 
-        m = InlineKeyboardMarkup(row_width=2)
-        # Exactly two buttons per row. Telegram renders each pair with
-        # matching column widths.
-        m.row(
-            InlineKeyboardButton(
-                "⬅️ အရင် Account",
-                callback_data=prev_cb,
-            ),
-            InlineKeyboardButton(
-                "နောက် Account ➡️",
-                callback_data=next_cb,
-            ),
+        kb = InlineKeyboardMarkup(row_width=2)
+        kb.row(
+            InlineKeyboardButton("⬅️ အရင် Account", callback_data=prev_cb),
+            InlineKeyboardButton("နောက် Account ➡️", callback_data=next_cb),
         )
-        m.row(
+        kb.row(
             InlineKeyboardButton(
                 "🔎 အသေးစိတ်ကြည့်မယ်",
                 callback_data=f"premium_account_detail_{acc['id']}",
@@ -677,17 +684,14 @@ def install(original):
                 callback_data=f"premium_fav_toggle_{acc['db_id']}",
             ),
         )
-        m.row(
+        kb.row(
             InlineKeyboardButton(
                 "⚡ အမြန်ဝယ်မယ်",
                 callback_data=f"premium_fast_buy_{acc['id']}",
             ),
-            InlineKeyboardButton(
-                "🏠 ပင်မ Menu",
-                callback_data="home",
-            ),
+            InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"),
         )
-        return m
+        return kb
 
     def send_account_card(chat_id, acc, kind, index, total):
         if not acc:
@@ -703,52 +707,77 @@ def install(original):
         photos = [p for p in (acc.get("photos") or []) if p][:3]
         nav = account_nav_markup(kind, acc)
 
-        # Send each photo separately. The keyboard belongs to the 3rd
-        # photo so Telegram shows the buttons directly below the images,
-        # without a separate blank/zero-width message.
+        text_card = (
+            _format_special_card(acc)
+            if kind == "special"
+            else (
+                f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
+                + format_account_wrapped(acc)
+            )
+        )
+
         if photos:
+            media = []
             for i, photo in enumerate(photos):
                 try:
-                    caption = ""
-                    markup = None
-
-                    if i == len(photos) - 1:
-                        caption = (
-                            f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
-                            + format_account_wrapped(acc)
+                    if i == 0:
+                        media.append(
+                            InputMediaPhoto(
+                                photo,
+                                caption=text_card,
+                                parse_mode="HTML",
+                            )
                         )
-                        markup = nav
-
-                    bot.send_photo(
-                        chat_id,
-                        photo,
-                        caption=caption,
-                        parse_mode="HTML" if caption else None,
-                        reply_markup=markup,
-                    )
+                    else:
+                        media.append(InputMediaPhoto(photo))
                 except Exception:
                     logging.exception(
-                        "Account photo send failed: %s photo_index=%s",
+                        "ACCOUNT_CARD_MEDIA_BUILD_FAILED account=%s photo=%s",
                         acc.get("id"),
                         i + 1,
                     )
 
-            # If all photo sends failed, keep a reliable text fallback.
-            # Do NOT send a blank message.
-            if not photos:
+            if media:
+                try:
+                    bot.send_media_group(chat_id, media)
+                except Exception:
+                    logging.exception(
+                        "ACCOUNT_CARD_MEDIA_GROUP_FAILED account=%s kind=%s",
+                        acc.get("id"),
+                        kind,
+                    )
+                    # Reliable fallback: send the same photos individually.
+                    for i, photo in enumerate(photos, 1):
+                        try:
+                            bot.send_photo(
+                                chat_id,
+                                photo,
+                                caption=text_card if i == 1 else None,
+                                parse_mode="HTML" if i == 1 else None,
+                            )
+                        except Exception:
+                            logging.exception(
+                                "ACCOUNT_CARD_PHOTO_FALLBACK_FAILED account=%s photo=%s",
+                                acc.get("id"),
+                                i,
+                            )
+            else:
                 bot.send_message(
                     chat_id,
-                    f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
-                    + format_account_wrapped(acc),
+                    text_card,
                     parse_mode="HTML",
-                    reply_markup=nav,
                 )
-            return
+        else:
+            bot.send_message(
+                chat_id,
+                text_card,
+                parse_mode="HTML",
+            )
 
+        # The menu is always sent once, after the account content.
         bot.send_message(
             chat_id,
-            f"🎯 <b>{index + 1} / {max(1, total)}</b>\n\n"
-            + format_account_wrapped(acc),
+            f"🆔 <b>{html.escape(str(acc['id']))}</b>",
             parse_mode="HTML",
             reply_markup=nav,
         )
@@ -756,6 +785,75 @@ def install(original):
     # ------------------------------------------------------------
     # State helpers
     # ------------------------------------------------------------
+    def discounted_account_ids():
+        result = rows(
+            """
+            SELECT id
+            FROM accounts
+            WHERE status='available'
+              AND sale_price IS NOT NULL
+              AND sale_price > 0
+              AND sale_price < price
+            ORDER BY id DESC
+            """
+        )
+        ids = []
+        for r in result:
+            try:
+                acc = account_by_number(int(r["id"]))
+                if acc and acc.get("status") == "available":
+                    ids.append(acc["id"])
+            except Exception:
+                logging.exception(
+                    "Regular discount account lookup failed id=%s",
+                    r["id"],
+                )
+        return ids
+
+    def special_deal_account_ids():
+        result = rows(
+            """
+            SELECT account_id
+            FROM premium_flash_deals
+            ORDER BY ends_at ASC
+            """
+        )
+        ids = []
+        for r in result:
+            try:
+                aid = int(r["account_id"])
+                acc = account_by_number(aid)
+                if acc and acc.get("status") == "available" and active_flash(aid):
+                    ids.append(acc["id"])
+            except Exception:
+                logging.exception(
+                    "Special deal account lookup failed id=%s",
+                    r["account_id"],
+                )
+        return ids
+
+    def regular_discount_ids():
+        out = []
+        for acc in original.get_available_accounts():
+            try:
+                normal_price = int(acc.get("price") or 0)
+                sale_price = int(acc.get("sale_price") or 0)
+                if normal_price > 0 and sale_price > 0 and sale_price < normal_price:
+                    out.append(acc["id"])
+            except Exception:
+                logging.exception("REGULAR_DISCOUNT_LOOKUP_FAILED account=%s", acc.get("id"))
+        return out
+
+    def special_discount_ids():
+        out = []
+        for acc in original.get_available_accounts():
+            try:
+                if active_flash(acc.get("db_id")):
+                    out.append(acc["id"])
+            except Exception:
+                logging.exception("SPECIAL_DISCOUNT_LOOKUP_FAILED account=%s", acc.get("id"))
+        return out
+
     def show_list(chat_id, user_id, ids, kind):
         if not ids:
             bot.send_message(
@@ -1097,6 +1195,16 @@ def install(original):
             bot.answer_callback_query(call.id)
             navigate(call, -1 if data.endswith("prev") else 1)
             return True
+        if data in ("premium_discount_prev", "premium_discount_next"):
+            bot.answer_callback_query(call.id)
+            navigate(call, -1 if data.endswith("prev") else 1)
+            return True
+
+        if data in ("premium_special_prev", "premium_special_next"):
+            bot.answer_callback_query(call.id)
+            navigate(call, -1 if data.endswith("prev") else 1)
+            return True
+
 
         if data == "premium_new_alert":
             bot.answer_callback_query(call.id)
@@ -1898,62 +2006,76 @@ def install(original):
             bot.answer_callback_query(call.id)
             navigate(call, -1 if data.endswith("prev") else 1)
             return True
+        if data in ("premium_discount_prev", "premium_discount_next"):
+            bot.answer_callback_query(call.id)
+            navigate(call, -1 if data.endswith("prev") else 1)
+            return True
+
 
         if data == "premium_special_deals":
             bot.answer_callback_query(call.id)
-            items = []
-            for r in rows("SELECT account_id, deal_price, ends_at FROM premium_flash_deals ORDER BY ends_at ASC"):
-                aid = int(r["account_id"])
-                acc = account_by_number(aid)
-                deal = active_flash(aid)
-                if acc and deal and acc.get("status") == "available":
-                    original_price = int(acc.get("price") or 0)
-                    items.append((acc, int(deal[0]), deal[1], original_price))
-
-            if not items:
+            ids = special_discount_ids()
+            if not ids:
                 bot.send_message(
                     call.message.chat.id,
-                    "🔥 လောလောဆယ် <b>အထူးစပရှယ် လျော့စျေးအကောင့်</b> မရှိသေးပါ။",
-                    parse_mode="HTML",
-                    reply_markup=buyer_features_menu(),
+                    '🔥 လောလောဆယ် အချိန်ကန့်သတ်ပြီး ဈေးလျော့ထားတဲ့ "အထူးစပရှယ် လျော့စျေးအကောင့်" မရှိသေးပါ။',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                    ]),
                 )
                 return True
 
-            for acc, deal_price, ends, original_price in items:
-                remain = max(0, int((ends - datetime.now(timezone.utc)).total_seconds()))
-                total_minutes = (remain + 59) // 60
-                if total_minutes >= 60:
-                    hours, rem_minutes = divmod(total_minutes, 60)
-                    expiry_text = f"{hours} နာရီ" if rem_minutes == 0 else f"{hours} နာရီ {rem_minutes} မိနစ်"
-                else:
-                    expiry_text = f"{total_minutes} မိနစ်"
+            original.set_state(
+                call.from_user.id,
+                {
+                    "flow": "premium_special",
+                    "premium_ids": ids,
+                    "premium_index": 0,
+                    "premium_kind": "special",
+                },
+            )
+            acc = account_by_text(ids[0])
+            send_account_card(
+                call.message.chat.id, acc, "special", 0, len(ids)
+            )
+            return True
 
-                discount_amount = max(0, original_price - deal_price)
-                discount_pct = int(round(discount_amount * 100 / original_price)) if original_price > 0 else 0
-                text_card = (
-                    "🔥 <b>အထူးစပရှယ် လျော့စျေးအကောင့်</b>\n\n"
-                    f"🆔 <b>{acc['id']}</b>\n"
-                    f"💰 အရင်ဈေး — <s>{original_price:,} MMK</s>\n"
-                    f"🔥 ယခုဈေး — <b>{deal_price:,} MMK</b>\n"
-                    f"🎟️ အကောင့်လျော့စျေးကူပွန် — <b>-{discount_amount:,} MMK ({discount_pct}%)</b>\n"
-                    f"⏰ ကုန်ဆုံးချိန် — <b>{expiry_text}</b>\n\n"
-                    + format_account_wrapped(acc)
+        if data == "premium_discount_accounts":
+            bot.answer_callback_query(call.id)
+            ids = regular_discount_ids()
+            if not ids:
+                bot.send_message(
+                    call.message.chat.id,
+                    '💸 လောလောဆယ် ပုံမှန်ဈေးထက် လျော့ဈေးထားတဲ့ Account မရှိသေးပါ။',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home")]
+                    ]),
                 )
+                return True
 
-                # Photos are sent separately; the text card always follows.
-                for photo in [p for p in (acc.get("photos") or []) if p][:15]:
-                    try:
-                        bot.send_photo(call.message.chat.id, photo)
-                    except Exception:
-                        logging.exception("Special deal photo send failed: %s", acc.get("id"))
+            original.set_state(
+                call.from_user.id,
+                {
+                    "flow": "premium_discount",
+                    "premium_ids": ids,
+                    "premium_index": 0,
+                    "premium_kind": "discount",
+                },
+            )
+            acc = account_by_text(ids[0])
+            send_account_card(
+                call.message.chat.id, acc, "discount", 0, len(ids)
+            )
+            return True
 
-                m = InlineKeyboardMarkup(row_width=2)
-                m.row(
-                    InlineKeyboardButton("⚡ အမြန်ဝယ်မယ်", callback_data=f"premium_fast_buy_{acc['id']}"),
-                    InlineKeyboardButton("❤️ သိမ်းထားမယ်", callback_data=f"premium_fav_toggle_{acc['db_id']}"),
-                )
-                m.add(InlineKeyboardButton("🏠 ပင်မ Menu", callback_data="home"))
-                bot.send_message(call.message.chat.id, text_card, parse_mode="HTML", reply_markup=m)
+        if data in ("premium_discount_prev", "premium_discount_next"):
+            bot.answer_callback_query(call.id)
+            navigate(call, -1 if data.endswith("prev") else 1)
+            return True
+
+        if data in ("premium_special_prev", "premium_special_next"):
+            bot.answer_callback_query(call.id)
+            navigate(call, -1 if data.endswith("prev") else 1)
             return True
 
         if data.startswith("premium_flash_buy_"):
