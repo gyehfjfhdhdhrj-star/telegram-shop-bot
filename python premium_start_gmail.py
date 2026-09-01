@@ -1,7 +1,7 @@
 """MLBB MARKET - Premium + Gmail OAuth launcher (v36 fixed).
 
 Render start command:
-    python premium_start_gmail_v36_fixed.py
+    python premium_start_gmail.py
 
 This launcher loads the v36 premium addon, including the admin payout
 receipt handler, while keeping the existing supabase launcher and Gmail
